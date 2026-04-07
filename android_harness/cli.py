@@ -218,6 +218,161 @@ def cmd_input_key(args: argparse.Namespace) -> None:
 
 
 # ======================================================================
+# Pentest sub-command handlers
+# ======================================================================
+
+
+def cmd_proxy_enable(args: argparse.Namespace) -> None:
+    from android_harness.proxy import Proxy
+    adb = ADB(serial=_find_serial(args))
+    proxy = Proxy(adb, host=args.host, port=args.port)
+    proxy.enable()
+
+
+def cmd_proxy_disable(args: argparse.Namespace) -> None:
+    from android_harness.proxy import Proxy
+    adb = ADB(serial=_find_serial(args))
+    Proxy(adb).disable()
+
+
+def cmd_proxy_status(args: argparse.Namespace) -> None:
+    from android_harness.proxy import Proxy
+    adb = ADB(serial=_find_serial(args))
+    current = Proxy(adb).get_current()
+    console.print(f"Current proxy: {current or '(none)'}")
+
+
+def cmd_proxy_install_ca(args: argparse.Namespace) -> None:
+    from android_harness.proxy import Proxy
+    adb = ADB(serial=_find_serial(args))
+    proxy = Proxy(adb)
+    if args.mitmproxy:
+        proxy.install_mitmproxy_ca()
+    else:
+        proxy.install_ca_cert(args.cert)
+
+
+def cmd_proxy_tcpdump(args: argparse.Namespace) -> None:
+    from android_harness.proxy import Proxy
+    adb = ADB(serial=_find_serial(args))
+    proxy = Proxy(adb)
+    if args.stop:
+        proxy.stop_tcpdump()
+        if args.output:
+            proxy.pull_capture(local=args.output)
+    else:
+        proxy.start_tcpdump()
+        console.print("[bold]Press Ctrl+C to stop, then run with --stop to pull capture.")
+
+
+def cmd_proxy_hosts(args: argparse.Namespace) -> None:
+    from android_harness.proxy import Proxy
+    adb = ADB(serial=_find_serial(args))
+    proxy = Proxy(adb)
+    if args.reset:
+        proxy.reset_hosts()
+    elif args.add:
+        parts = args.add.split("=", 1)
+        if len(parts) != 2:
+            console.print("[red]Use --add IP=hostname")
+            return
+        proxy.add_hosts_entry(parts[0], parts[1])
+    else:
+        console.print(proxy.show_hosts())
+
+
+def cmd_recon(args: argparse.Namespace) -> None:
+    from android_harness.recon import full_recon, fingerprint_page, spider_page, extract_storage, analyze_csp
+    from android_harness.recon import print_fingerprint, print_spider, print_storage, print_csp
+
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+    browser.enable_cdp()
+    browser.connect()
+
+    if args.url:
+        browser.navigate(args.url)
+        import time; time.sleep(2)
+
+    if args.full:
+        full_recon(browser, output=args.output)
+    elif args.fingerprint:
+        fp = fingerprint_page(browser)
+        print_fingerprint(fp)
+    elif args.spider:
+        sp = spider_page(browser)
+        print_spider(sp)
+    elif args.storage:
+        data = extract_storage(browser)
+        print_storage(data)
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+    elif args.csp:
+        csp_data = analyze_csp(browser)
+        print_csp(csp_data)
+    else:
+        # Default: full
+        full_recon(browser, output=args.output)
+
+    browser.close()
+
+
+def cmd_hooks(args: argparse.Namespace) -> None:
+    from android_harness.hooks import Hooks
+
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+    browser.enable_cdp()
+    browser.connect()
+
+    hooks = Hooks(browser)
+    hook_names = args.hooks.split(",") if args.hooks else ["all"]
+    hooks.install(*hook_names)
+
+    if args.url:
+        browser.navigate(args.url)
+
+    if args.wait:
+        console.print(f"[bold]Collecting for {args.wait}s …")
+        import time; time.sleep(args.wait)
+    else:
+        console.print("[bold]Hooks active. Press Ctrl+C to collect and exit.")
+        try:
+            while True:
+                import time; time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+    data = hooks.collect()
+    total = sum(len(v) for v in data.values() if isinstance(v, list))
+    console.print(f"\n[green]Collected {total} events")
+
+    if args.output:
+        hooks.dump(args.output)
+    else:
+        console.print(json.dumps(data, indent=2, default=str))
+
+    browser.close()
+
+
+def cmd_pentest_run(args: argparse.Namespace) -> None:
+    from android_harness.pentest import run_script
+
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+    browser.enable_cdp()
+    browser.connect()
+
+    ctx = run_script(args.script, adb, browser)
+
+    if args.report:
+        ctx.report(path=args.report)
+
+    browser.close()
+
+
+# ======================================================================
 # Parser construction
 # ======================================================================
 
@@ -329,6 +484,68 @@ def build_parser() -> argparse.ArgumentParser:
     p = isub.add_parser("key", help="Send a keycode")
     p.add_argument("keycode")
     p.set_defaults(func=cmd_input_key)
+
+    # ---- proxy ----
+    proxy_sub = sub.add_parser("proxy", help="HTTP proxy & traffic capture")
+    psub = proxy_sub.add_subparsers(dest="proxy_cmd", required=True)
+
+    p = psub.add_parser("enable", help="Set device HTTP proxy")
+    p.add_argument("--host", default="10.0.2.2", help="Proxy host (default: host loopback)")
+    p.add_argument("--port", type=int, default=8080, help="Proxy port")
+    p.set_defaults(func=cmd_proxy_enable)
+
+    p = psub.add_parser("disable", help="Remove device proxy")
+    p.set_defaults(func=cmd_proxy_disable)
+
+    p = psub.add_parser("status", help="Show current proxy setting")
+    p.set_defaults(func=cmd_proxy_status)
+
+    p = psub.add_parser("install-ca", help="Install CA certificate for TLS interception")
+    p.add_argument("--cert", help="Path to CA cert (PEM)")
+    p.add_argument("--mitmproxy", action="store_true", help="Auto-find mitmproxy CA")
+    p.set_defaults(func=cmd_proxy_install_ca)
+
+    p = psub.add_parser("tcpdump", help="Capture traffic with tcpdump")
+    p.add_argument("--stop", action="store_true", help="Stop capture and pull pcap")
+    p.add_argument("-o", "--output", default="capture.pcap", help="Local pcap output path")
+    p.set_defaults(func=cmd_proxy_tcpdump)
+
+    p = psub.add_parser("hosts", help="Manage /etc/hosts on device")
+    p.add_argument("--add", help="Add entry: IP=hostname")
+    p.add_argument("--reset", action="store_true", help="Reset to default")
+    p.set_defaults(func=cmd_proxy_hosts)
+
+    # ---- recon ----
+    p = sub.add_parser("recon", help="Reconnaissance: fingerprint, spider, storage, CSP")
+    p.add_argument("--url", "-u", help="Navigate to URL first")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT, help="CDP port")
+    p.add_argument("--full", action="store_true", help="Run all recon modules (default)")
+    p.add_argument("--fingerprint", action="store_true", help="Tech fingerprint only")
+    p.add_argument("--spider", action="store_true", help="Spider links/forms only")
+    p.add_argument("--storage", action="store_true", help="Dump cookies/localStorage/sessionStorage")
+    p.add_argument("--csp", action="store_true", help="CSP analysis only")
+    p.add_argument("-o", "--output", help="Save report to JSON file")
+    p.set_defaults(func=cmd_recon)
+
+    # ---- hooks ----
+    p = sub.add_parser("hooks", help="Install JS hooks to capture browser API calls")
+    p.add_argument("--hooks", default="all",
+                    help="Comma-separated: xhr,fetch,cookies,websocket,postmessage,console,storage,forms,all")
+    p.add_argument("--url", "-u", help="Navigate to URL after installing hooks")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
+    p.add_argument("--wait", type=int, help="Collect for N seconds then exit")
+    p.add_argument("-o", "--output", help="Save captured data to JSON")
+    p.set_defaults(func=cmd_hooks)
+
+    # ---- pentest ----
+    pentest_sub = sub.add_parser("pentest", help="Pentest automation")
+    ptsub = pentest_sub.add_subparsers(dest="pentest_cmd", required=True)
+
+    p = ptsub.add_parser("run", help="Run a pentest script")
+    p.add_argument("script", help="Path to Python script with run(ctx) function")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
+    p.add_argument("--report", "-r", help="Save report to JSON path")
+    p.set_defaults(func=cmd_pentest_run)
 
     return parser
 

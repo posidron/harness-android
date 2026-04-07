@@ -277,3 +277,66 @@ class Browser:
 
     def enable_page_events(self) -> None:
         self.send("Page.enable")
+
+    # ------------------------------------------------------------------
+    # Security & pentest helpers
+    # ------------------------------------------------------------------
+
+    def enable_security(self) -> None:
+        """Enable the Security domain for certificate/TLS info."""
+        self.send("Security.enable")
+
+    def get_security_state(self) -> dict:
+        """Return the page's security state (cert info, TLS version, etc.)."""
+        self.enable_security()
+        return self.send("Security.getSecurityState") if hasattr(self, '_ws') and self._ws else {}
+
+    def override_certificate_errors(self, allow: bool = True) -> None:
+        """Accept or reject certificate errors (e.g. self-signed certs)."""
+        self.send("Security.setIgnoreCertificateErrors", {"ignore": allow})
+
+    def inject_script_on_load(self, source: str) -> str:
+        """Inject JS that runs before every page load. Returns script ID."""
+        self.send("Page.enable")
+        result = self.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": source},
+        )
+        return result.get("identifier", "")
+
+    def remove_injected_script(self, identifier: str) -> None:
+        self.send("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
+
+    def get_response_body(self, request_id: str) -> bytes:
+        """Fetch a response body by network request ID."""
+        result = self.send("Network.getResponseBody", {"requestId": request_id})
+        body = result.get("body", "")
+        import base64
+        if result.get("base64Encoded", False):
+            return base64.b64decode(body)
+        return body.encode()
+
+    def emulate_device(
+        self,
+        width: int = 412,
+        height: int = 915,
+        device_scale_factor: float = 2.625,
+        mobile: bool = True,
+        user_agent: str | None = None,
+    ) -> None:
+        """Override device metrics for fingerprint spoofing."""
+        params: dict[str, Any] = {
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": device_scale_factor,
+            "mobile": mobile,
+        }
+        self.send("Emulation.setDeviceMetricsOverride", params)
+        if user_agent:
+            self.set_user_agent(user_agent)
+
+    def disable_cache(self) -> None:
+        self.send("Network.setCacheDisabled", {"cacheDisabled": True})
+
+    def enable_cache(self) -> None:
+        self.send("Network.setCacheDisabled", {"cacheDisabled": False})
