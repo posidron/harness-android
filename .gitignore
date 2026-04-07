@@ -37,5 +37,13 @@ page*.png
 *.mp4
 *.apk
 
+# Forensics output
+app_data/
+*_report.json
+*_forensics.json
+*_raw.json
+*.pcap
+*.bak
+
 # Logs
 *.log

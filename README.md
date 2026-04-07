@@ -31,7 +31,10 @@ poetry run harness-android browser cdp --interactive
 # 7 — Run a full recon against a target
 poetry run harness-android recon --url "https://target.example.com" -o recon.json
 
-# 8 — Run a pentest script
+# 8 — Scan an APK for hardcoded secrets
+poetry run harness-android forensics scan app.apk -o report.json
+
+# 9 — Run a pentest script
 poetry run harness-android pentest run my_test.py --report findings.json
 ```
 
@@ -368,6 +371,49 @@ tracer.dump("analysis.json", events, messages, results)
 tracer.dump_chrome_trace("trace.json")
 ```
 
+### APK forensics
+
+Scan APK files and installed app data for hardcoded secrets, manifest security issues, and sensitive database contents.
+
+#### `forensics scan`
+Full APK scan — secrets + manifest analysis:
+
+```bash
+harness-android forensics scan app.apk -o report.json
+```
+
+Scans 27 secret patterns: AWS keys, Google API keys, GitHub/Slack/Stripe tokens, JWTs, PEM private keys, Azure connection strings, generic passwords, hardcoded URLs with credentials, and more.
+
+#### `forensics secrets`
+Secret scanning only:
+
+```bash
+harness-android forensics secrets app.apk
+```
+
+#### `forensics manifest`
+AndroidManifest.xml security audit — flags `debuggable`, `allowBackup`, `usesCleartextTraffic`, exported components without permissions, dangerous permissions, custom URI schemes:
+
+```bash
+harness-android forensics manifest app.apk
+```
+
+#### `forensics app-data`
+Extract an installed app's private data from the emulator (runs `adb root`) and scan everything — shared preferences, SQLite databases, internal files:
+
+```bash
+harness-android forensics app-data com.example.app --report findings.json
+```
+
+Automatically detects sensitive database tables (cookies, logins, passwords, tokens, sessions) and scans all text columns for secrets.
+
+#### `forensics installed`
+Pull and scan every 3rd-party APK installed on the device:
+
+```bash
+harness-android forensics installed -o all_apps_report.json
+```
+
 ---
 
 ## Python API
@@ -506,6 +552,7 @@ harness-android/
     ├── recon.py                # Fingerprint, spider, storage, CSP analysis
     ├── pentest.py              # PentestContext + script runner
     ├── mojo.py                 # Mojo IPC tracing, Web API triggers, fuzzing
+    ├── forensics.py            # APK secret scanning, manifest audit, app data extraction
     └── cli.py                  # argparse CLI (all commands)
 ```
 

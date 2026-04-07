@@ -491,6 +491,96 @@ def cmd_mojo_fuzz(args: argparse.Namespace) -> None:
 
 
 # ======================================================================
+# Forensics sub-command handlers
+# ======================================================================
+
+
+def cmd_forensics_scan(args: argparse.Namespace) -> None:
+    from harness_android.forensics import full_apk_scan
+    full_apk_scan(args.apk, output=args.output)
+
+
+def cmd_forensics_secrets(args: argparse.Namespace) -> None:
+    from harness_android.forensics import scan_apk_secrets, print_findings
+    findings = scan_apk_secrets(args.apk)
+    print_findings(findings)
+    if args.output:
+        import json as _json
+        from harness_android.forensics import _finding_to_dict
+        with open(args.output, "w") as f:
+            _json.dump([_finding_to_dict(x) for x in findings], f, indent=2)
+        console.print(f"[green]Saved to {args.output}")
+
+
+def cmd_forensics_manifest(args: argparse.Namespace) -> None:
+    from harness_android.forensics import analyze_apk_manifest, print_findings
+    findings = analyze_apk_manifest(args.apk)
+    print_findings(findings)
+
+
+def cmd_forensics_appdata(args: argparse.Namespace) -> None:
+    from harness_android.forensics import extract_app_data, print_findings
+    adb = ADB(serial=_find_serial(args))
+    _, findings = extract_app_data(adb, args.package, local_dir=args.output_dir)
+    print_findings(findings)
+    if args.report:
+        import json as _json
+        from harness_android.forensics import _finding_to_dict
+        with open(args.report, "w") as f:
+            _json.dump([_finding_to_dict(x) for x in findings], f, indent=2)
+        console.print(f"[green]Report saved to {args.report}")
+
+
+def cmd_forensics_installed(args: argparse.Namespace) -> None:
+    """Pull and scan all 3rd-party APKs from the device."""
+    from harness_android.forensics import scan_apk_secrets, analyze_apk_manifest, print_findings
+
+    adb = ADB(serial=_find_serial(args))
+    # List 3rd-party packages
+    output = adb.shell("pm", "list", "packages", "-3", "-f")
+    all_findings = []
+    for line in output.strip().splitlines():
+        # Format: package:<path>=<name>
+        line = line.strip()
+        if not line.startswith("package:"):
+            continue
+        parts = line[len("package:"):].split("=", 1)
+        if len(parts) != 2:
+            continue
+        apk_remote, pkg_name = parts
+        console.print(f"\n[bold]Scanning {pkg_name} ({apk_remote}) …")
+
+        # Pull APK to temp
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            adb.pull(apk_remote, tmp_path)
+            findings = scan_apk_secrets(tmp_path) + analyze_apk_manifest(tmp_path)
+            for f in findings:
+                f.description = f"[{pkg_name}] {f.description}"
+            all_findings.extend(findings)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Failed: {exc}")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    console.print(f"\n[bold]{'='*60}")
+    print_findings(all_findings)
+
+    if args.output:
+        import json as _json
+        from harness_android.forensics import _finding_to_dict
+        with open(args.output, "w") as f:
+            _json.dump({
+                "total_apps_scanned": len(output.strip().splitlines()),
+                "total_findings": len(all_findings),
+                "findings": [_finding_to_dict(x) for x in all_findings],
+            }, f, indent=2)
+        console.print(f"[green]Report saved to {args.output}")
+
+
+# ======================================================================
 # Parser construction
 # ======================================================================
 
@@ -691,6 +781,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
     p.add_argument("-o", "--output", help="Save results to JSON")
     p.set_defaults(func=cmd_mojo_fuzz)
+
+    # ---- forensics ----
+    forensics_sub = sub.add_parser("forensics", help="APK forensics and secret scanning")
+    fsub = forensics_sub.add_subparsers(dest="forensics_cmd", required=True)
+
+    p = fsub.add_parser("scan", help="Full APK scan: secrets + manifest")
+    p.add_argument("apk", help="Path to .apk file")
+    p.add_argument("-o", "--output", help="Save report to JSON")
+    p.set_defaults(func=cmd_forensics_scan)
+
+    p = fsub.add_parser("secrets", help="Scan APK for hardcoded secrets only")
+    p.add_argument("apk", help="Path to .apk file")
+    p.add_argument("-o", "--output", help="Save findings to JSON")
+    p.set_defaults(func=cmd_forensics_secrets)
+
+    p = fsub.add_parser("manifest", help="Analyze AndroidManifest.xml for security issues")
+    p.add_argument("apk", help="Path to .apk file")
+    p.set_defaults(func=cmd_forensics_manifest)
+
+    p = fsub.add_parser("app-data", help="Extract and scan an installed app's data (requires emulator)")
+    p.add_argument("package", help="Package name (e.g. com.example.app)")
+    p.add_argument("-o", "--output-dir", default="app_data", help="Local output directory")
+    p.add_argument("--report", help="Save findings to JSON")
+    p.set_defaults(func=cmd_forensics_appdata)
+
+    p = fsub.add_parser("installed", help="Scan all installed 3rd-party APKs on device")
+    p.add_argument("-o", "--output", help="Save combined report to JSON")
+    p.set_defaults(func=cmd_forensics_installed)
 
     return parser
 
