@@ -537,7 +537,7 @@ harness-android/
 ├── ARCHITECTURE.md             # Detailed design & data-flow docs
 ├── .gitignore
 ├── examples/
-│   └── example_pentest.py      # Sample pentest script
+│   ├── recon_pentest.py         # Recon plugin (fingerprint, spider, headers, CSP)\n│   └── mojo_pentest.py          # Mojo IPC plugin (trace, trigger, fuzz)
 └── harness_android/
     ├── __init__.py
     ├── config.py               # Paths, platform detection, constants
