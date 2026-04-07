@@ -786,27 +786,27 @@ def build_parser() -> argparse.ArgumentParser:
     forensics_sub = sub.add_parser("forensics", help="APK forensics and secret scanning")
     fsub = forensics_sub.add_subparsers(dest="forensics_cmd", required=True)
 
-    p = fsub.add_parser("scan", help="Full APK scan: secrets + manifest")
+    p = fsub.add_parser("scan", help="Full APK scan: secrets + manifest (local, no emulator needed)")
     p.add_argument("apk", help="Path to .apk file")
     p.add_argument("-o", "--output", help="Save report to JSON")
     p.set_defaults(func=cmd_forensics_scan)
 
-    p = fsub.add_parser("secrets", help="Scan APK for hardcoded secrets only")
+    p = fsub.add_parser("secrets", help="Scan APK for hardcoded secrets (local, no emulator needed)")
     p.add_argument("apk", help="Path to .apk file")
     p.add_argument("-o", "--output", help="Save findings to JSON")
     p.set_defaults(func=cmd_forensics_secrets)
 
-    p = fsub.add_parser("manifest", help="Analyze AndroidManifest.xml for security issues")
+    p = fsub.add_parser("manifest", help="Analyze AndroidManifest.xml security (local, no emulator needed)")
     p.add_argument("apk", help="Path to .apk file")
     p.set_defaults(func=cmd_forensics_manifest)
 
-    p = fsub.add_parser("app-data", help="Extract and scan an installed app's data (requires emulator)")
+    p = fsub.add_parser("app-data", help="Pull and scan installed app's private data (emulator required)")
     p.add_argument("package", help="Package name (e.g. com.example.app)")
     p.add_argument("-o", "--output-dir", default="app_data", help="Local output directory")
     p.add_argument("--report", help="Save findings to JSON")
     p.set_defaults(func=cmd_forensics_appdata)
 
-    p = fsub.add_parser("installed", help="Scan all installed 3rd-party APKs on device")
+    p = fsub.add_parser("installed", help="Pull and scan all 3rd-party APKs (emulator required)")
     p.add_argument("-o", "--output", help="Save combined report to JSON")
     p.set_defaults(func=cmd_forensics_installed)
 
