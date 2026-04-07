@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "android-harness"
+version = "0.1.0"
+description = "Cross-platform Android emulator harness with remote control capabilities"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "android_harness"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.31"
+websocket-client = "^1.7"
+rich = "^13.7"
+Pillow = "^10.2"
+
+[tool.poetry.scripts]
+android-harness = "android_harness.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
