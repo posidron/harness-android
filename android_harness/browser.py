@@ -35,6 +35,7 @@ class Browser:
         self.local_port = local_port
         self._ws: Optional[websocket.WebSocket] = None
         self._msg_id = 0
+        self._extra_chrome_flags: list[str] = []
 
     # ------------------------------------------------------------------
     # Intent-based control (no CDP needed)
@@ -68,6 +69,8 @@ class Browser:
         The emulator runs as root so we can write this directly.
         """
         flags = "_ --disable-fre --no-default-browser-check --no-first-run --enable-remote-debugging --remote-allow-origins=*"
+        if self._extra_chrome_flags:
+            flags += " " + " ".join(self._extra_chrome_flags)
         # Use a single quoted shell command to avoid quoting issues across
         # the local-subprocess → adb-shell boundary.
         for dest in (

@@ -372,6 +372,124 @@ def cmd_pentest_run(args: argparse.Namespace) -> None:
     browser.close()
 
 
+def cmd_mojo_trace(args: argparse.Namespace) -> None:
+    """Capture Mojo IPC trace while triggering Web APIs."""
+    from android_harness.mojo import MojoTracer
+
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+    if args.verbose:
+        browser._extra_chrome_flags.append("--enable-logging")
+        browser._extra_chrome_flags.append("--vmodule=*mojo*=3")
+    browser.enable_cdp()
+    browser.connect()
+
+    if args.url:
+        browser.navigate(args.url)
+        import time; time.sleep(2)
+
+    tracer = MojoTracer(browser, verbose=args.verbose)
+    tracer.start_trace()
+
+    if args.trigger:
+        results = tracer.trigger_all_apis()
+        tracer.print_trigger_results(results)
+    else:
+        duration = args.duration or 10
+        console.print(f"[bold]Recording Mojo trace for {duration}s …")
+        import time; time.sleep(duration)
+
+    events = tracer.stop_trace()
+    messages = tracer.extract_mojo_messages(events)
+    tracer.print_summary(messages)
+
+    if args.output:
+        tracer.dump(args.output, events, messages,
+                    results if args.trigger else None)
+
+    if args.chrome_trace:
+        tracer.dump_chrome_trace(args.chrome_trace)
+
+    browser.close()
+
+
+def cmd_mojo_trigger(args: argparse.Namespace) -> None:
+    """Trigger Mojo-backed Web APIs and show results."""
+    from android_harness.mojo import MojoTracer
+
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+    browser.enable_cdp()
+    browser.connect()
+
+    if args.url:
+        browser.navigate(args.url)
+        import time; time.sleep(2)
+
+    tracer = MojoTracer(browser)
+    results = tracer.trigger_all_apis()
+    tracer.print_trigger_results(results)
+
+    if args.output:
+        tracer.dump(args.output, trigger_results=results)
+
+    browser.close()
+
+
+def cmd_mojo_fuzz(args: argparse.Namespace) -> None:
+    """Fuzz a Mojo-backed Web API with various inputs."""
+    from android_harness.mojo import MojoTracer, MOJO_WEB_API_TRIGGERS
+
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+    browser.enable_cdp()
+    browser.connect()
+
+    if args.url:
+        browser.navigate(args.url)
+        import time; time.sleep(2)
+
+    tracer = MojoTracer(browser)
+
+    # Find the API template
+    target = None
+    for name, js, iface in MOJO_WEB_API_TRIGGERS:
+        if name.lower() == args.api.lower():
+            target = (name, js, iface)
+            break
+
+    if target is None:
+        console.print(f"[red]Unknown API: {args.api}")
+        console.print("Available APIs:")
+        for name, _, iface in MOJO_WEB_API_TRIGGERS:
+            console.print(f"  {name:40s}  {iface}")
+        browser.close()
+        return
+
+    name, js_template, iface = target
+    # Replace the original JS with a fuzzable version if possible
+    # For most APIs the original JS code IS the template
+    if "{FUZZ}" not in js_template:
+        console.print(f"[yellow]API '{name}' doesn't have a {{FUZZ}} template — running with default fuzz strings against it")
+        # We'll still exercise it with each fuzz input as extra context
+        js_template_fuzz = js_template
+    else:
+        js_template_fuzz = js_template
+
+    tracer.start_trace()
+    results = tracer.fuzz_api(name, js_template_fuzz, MojoTracer.FUZZ_STRINGS, iface)
+    events = tracer.stop_trace()
+    messages = tracer.extract_mojo_messages(events)
+
+    tracer.print_trigger_results(results)
+    tracer.print_summary(messages)
+
+    if args.output:
+        tracer.dump(args.output, events, messages, results)
+
+    browser.close()
+
+
 # ======================================================================
 # Parser construction
 # ======================================================================
@@ -546,6 +664,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
     p.add_argument("--report", "-r", help="Save report to JSON path")
     p.set_defaults(func=cmd_pentest_run)
+
+    # ---- mojo ----
+    mojo_sub = sub.add_parser("mojo", help="Mojo IPC tracing and testing")
+    msub = mojo_sub.add_subparsers(dest="mojo_cmd", required=True)
+
+    p = msub.add_parser("trace", help="Capture Mojo IPC trace")
+    p.add_argument("--url", "-u", help="Navigate to URL first")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
+    p.add_argument("--trigger", action="store_true", help="Trigger all Mojo-backed Web APIs during trace")
+    p.add_argument("--duration", type=int, help="Record for N seconds (default: 10, ignored with --trigger)")
+    p.add_argument("--verbose", "-v", action="store_true", help="Enable verbose Mojo trace categories")
+    p.add_argument("-o", "--output", help="Save analysis to JSON")
+    p.add_argument("--chrome-trace", help="Save raw trace for chrome://tracing")
+    p.set_defaults(func=cmd_mojo_trace)
+
+    p = msub.add_parser("trigger", help="Trigger all Mojo-backed Web APIs and show results")
+    p.add_argument("--url", "-u", help="Navigate to URL first")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
+    p.add_argument("-o", "--output", help="Save results to JSON")
+    p.set_defaults(func=cmd_mojo_trigger)
+
+    p = msub.add_parser("fuzz", help="Fuzz a Mojo-backed Web API")
+    p.add_argument("api", help="API name (e.g. Clipboard.writeText, Permissions.query)")
+    p.add_argument("--url", "-u", help="Navigate to URL first")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
+    p.add_argument("-o", "--output", help="Save results to JSON")
+    p.set_defaults(func=cmd_mojo_fuzz)
 
     return parser
 

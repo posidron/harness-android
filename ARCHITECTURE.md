@@ -69,12 +69,13 @@ android-harness is a cross-platform (Windows/macOS) Android emulator harness bui
 | **intercept.py** | CDP `Fetch` domain wrapper. Decorator-based handler registration (`@interceptor.on_request`, `@interceptor.on_response`) with glob-style URL matching. Pauses requests at request or response stage, lets handlers inspect/modify/replace, then continues or fulfills. Background listener thread. Request log with JSON dump. |
 | **recon.py** | **Fingerprint**: detects JS frameworks (React, Angular, Vue, jQuery, Next.js, Nuxt, Svelte, Bootstrap, Tailwind), meta generator tag. **Spider**: extracts all links, forms (action/method/fields), script sources, iframes. **Storage**: dumps cookies, localStorage, sessionStorage. **CSP**: parses Content-Security-Policy, flags unsafe-inline, unsafe-eval, wildcards, missing directives. **full_recon()**: runs all four and generates a JSON report. |
 | **pentest.py** | `PentestContext` — rich object passed to user pentest scripts, bundles ADB + Browser + Hooks + Interceptor + Proxy + Recon with convenience methods (navigate, click, type, screenshot, add_finding, report). `run_script()` loads a user `.py` file with `run(ctx)` and executes it. |
+| **mojo.py** | **Mojo IPC testing** via CDP `Tracing` domain. `MojoTracer` starts/stops Chrome traces with Mojo-specific categories (`mojom`, `ipc`, `toplevel`). 23 built-in Web API triggers that exercise specific `*.mojom.*` interfaces (Permissions, Clipboard, Geolocation, MediaDevices, WebUSB, WebBluetooth, Storage, IndexedDB, ServiceWorker, etc.). Trace parser extracts Mojo messages (interface, method, process, timing). Fuzz helper substitutes payloads into Web API calls. Output in JSON + Chrome trace format (loadable in `chrome://tracing`). |
 
 ### CLI layer
 
 | Module | Responsibility |
 |---|---|
-| **cli.py** | argparse-based CLI. 18 top-level commands across 6 groups: emulator management (setup, create, delete, start, stop, status), device control (shell, install, screenshot, push, pull, input), browser (open, cdp), proxy (enable, disable, status, install-ca, tcpdump, hosts), recon, hooks, pentest (run). |
+| **cli.py** | argparse-based CLI. 21 top-level commands across 7 groups: emulator management (setup, create, delete, start, stop, status), device control (shell, install, screenshot, push, pull, input), browser (open, cdp), proxy (enable, disable, status, install-ca, tcpdump, hosts), recon, hooks, pentest (run), mojo (trace, trigger, fuzz). |
 
 ---
 
@@ -234,6 +235,63 @@ Runs on the device as a background process. Captures all interfaces. Pull the pc
    └── Runtime.evaluate("window.__harness_hooks__")
        → returns {fetch: [{url, method, body, timestamp}, ...], ...}
 ```
+
+### Mojo IPC observation flow
+
+```
+                           Chrome (in emulator)
+                    ┌──────────────────────────────────┐
+                    │  Browser Process (privileged)     │
+                    │     ▲                             │
+                    │     │  Mojo IPC                   │
+                    │     ▼                             │
+                    │  Renderer Process (sandboxed)     │
+                    │     ▲                             │
+                    │     │  Web API call               │
+                    │     │  (Permissions, Clipboard,   │
+                    │     │   WebUSB, Geolocation, …)   │
+                    └─────┼────────────────────────────┘
+                          │
+    ┌─────────────────────┼──────────────────────────────────────┐
+    │  android-harness    │                                      │
+    │                     │                                      │
+    │  1. Tracing.start(categories=["mojom","ipc","toplevel"])   │
+    │     → Chrome enables Mojo trace points                     │
+    │                                                            │
+    │  2. Runtime.evaluate(Web API JS)                           │
+    │     → renderer calls navigator.permissions.query()         │
+    │     → Mojo message: blink.mojom.PermissionService          │
+    │     → traced by Chrome's internal instrumentation          │
+    │                                                            │
+    │  3. Tracing.end()                                          │
+    │     → Tracing.dataCollected events with trace data         │
+    │     → parse: extract interface names, methods, counts      │
+    │                                                            │
+    │  4. Output:                                                │
+    │     ├── Summary table (interface → count)                  │
+    │     ├── JSON analysis (mojo_trace.json)                    │
+    │     └── Chrome trace (chrome://tracing loadable)           │
+    └────────────────────────────────────────────────────────────┘
+```
+
+**Why this works**: Chrome's tracing infrastructure (`chrome://tracing`) records all Mojo IPC
+messages as trace events when the `mojom` / `ipc` categories are enabled. The CDP `Tracing`
+domain exposes this programmatically. By triggering Web APIs via `Runtime.evaluate`, we force
+the renderer to send Mojo messages to the browser process, and the trace captures exactly which
+interfaces and methods are exercised.
+
+**What gets captured**:
+- Interface name (e.g., `blink.mojom.PermissionService`)
+- Method called (e.g., `HasPermission`)
+- Process IDs for sender and receiver
+- Timing (timestamp + duration in microseconds)
+- Message direction (send / receive / reply)
+
+**23 Web APIs tested**, covering:
+- `blink.mojom.*` — Permissions, Notifications, Clipboard, MediaDevices, Credentials, WebBluetooth, QuotaManager, CacheStorage, LockManager, IDBFactory, ServiceWorker, FileSystemAccess, WakeLock, SharedWorker
+- `device.mojom.*` — Geolocation, UsbDeviceManager, NFC, SensorProvider
+- `shape_detection.mojom.*` — BarcodeDetection
+- `payments.mojom.*` — PaymentRequest
 
 ---
 

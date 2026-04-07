@@ -304,6 +304,70 @@ def run(ctx):
     ctx.report(path="login_test_report.json")
 ```
 
+### Mojo IPC testing
+
+Chromium's Mojo IPC is the communication layer between the sandboxed renderer and privileged browser processes — a critical attack surface. android-harness can trace, trigger, and fuzz Mojo interfaces from outside the browser.
+
+#### `mojo trigger`
+Exercise all 23 Mojo-backed Web APIs and see which interfaces are reachable:
+
+```bash
+android-harness mojo trigger --url "https://target.example.com"
+```
+
+This calls APIs like Permissions, Clipboard, Geolocation, MediaDevices, WebUSB, WebBluetooth, StorageManager, IndexedDB, ServiceWorker, WakeLock, etc. — each one exercises a different `*.mojom.*` interface.
+
+#### `mojo trace`
+Capture a Chrome trace with Mojo IPC categories while triggering APIs:
+
+```bash
+# Trace + trigger all APIs
+android-harness mojo trace --url "https://target.example.com" --trigger -o mojo.json
+
+# Passive trace for 30 seconds (capture during manual interaction)
+android-harness mojo trace --duration 30 --verbose -o mojo.json
+
+# Save raw trace for chrome://tracing visualizer
+android-harness mojo trace --trigger --chrome-trace trace.json
+```
+
+#### `mojo fuzz`
+Fuzz a specific Mojo-backed Web API with boundary inputs:
+
+```bash
+android-harness mojo fuzz Clipboard.writeText --url "https://example.com"
+android-harness mojo fuzz StorageManager.estimate
+android-harness mojo fuzz Permissions.query -o fuzz_results.json
+```
+
+Built-in fuzz payloads include: empty strings, megabyte-length strings, null, undefined, NaN, typed arrays, blobs, lone surrogates, null bytes, and more.
+
+#### Python API
+
+```python
+from android_harness.mojo import MojoTracer
+
+tracer = MojoTracer(browser, verbose=True)
+tracer.start_trace()
+results = tracer.trigger_all_apis()       # exercises 23 Mojo interfaces
+events = tracer.stop_trace()              # raw Chrome trace events
+
+messages = tracer.extract_mojo_messages(events)
+tracer.print_summary(messages)
+
+# Fuzz a specific API
+fuzz_results = tracer.fuzz_api(
+    "Clipboard.writeText",
+    "navigator.clipboard.writeText({FUZZ}).catch(e => e.message)",
+    MojoTracer.FUZZ_STRINGS,
+    "blink.mojom.ClipboardHost",
+)
+
+# Save for offline analysis / chrome://tracing
+tracer.dump("analysis.json", events, messages, results)
+tracer.dump_chrome_trace("trace.json")
+```
+
 ---
 
 ## Python API
@@ -441,6 +505,7 @@ android-harness/
     ├── intercept.py            # CDP Fetch request/response interception
     ├── recon.py                # Fingerprint, spider, storage, CSP analysis
     ├── pentest.py              # PentestContext + script runner
+    ├── mojo.py                 # Mojo IPC tracing, Web API triggers, fuzzing
     └── cli.py                  # argparse CLI (all commands)
 ```
 
