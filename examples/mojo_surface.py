@@ -1,12 +1,12 @@
 """Example: Mojo IPC surface exploration.
 
 Traces Mojo IPC while exercising Web APIs, then analyzes the results.
-Run with: android-harness pentest run examples/mojo_surface.py
+Run with: harness-android pentest run examples/mojo_surface.py
 """
 
 
 def run(ctx):
-    from android_harness.mojo import MojoTracer
+    from harness_android.mojo import MojoTracer
 
     ctx.navigate("https://example.com")
     ctx.wait(2)

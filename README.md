@@ -1,4 +1,4 @@
-# android-harness
+# harness-android
 
 Cross-platform Android emulator harness and **mobile browser penetration testing toolkit**. Boots a real Android emulator, controls Chrome via DevTools Protocol, intercepts traffic, injects JS hooks, and generates recon reports — all from a single CLI or Python API. Works on **Windows** and **macOS**.
 
@@ -14,25 +14,25 @@ pip install poetry        # if you don't have it
 poetry install
 
 # 2 — Download SDK + system image (one-time, ~5 GB)
-poetry run android-harness setup
+poetry run harness-android setup
 
 # 3 — Boot the emulator (creates AVD automatically)
-poetry run android-harness start
+poetry run harness-android start
 
 # 4 — Open a URL in Chrome
-poetry run android-harness browser open "https://example.com"
+poetry run harness-android browser open "https://example.com"
 
 # 5 — Control Chrome via DevTools Protocol
-poetry run android-harness browser cdp --navigate "https://example.com" --title
+poetry run harness-android browser cdp --navigate "https://example.com" --title
 
 # 6 — Interactive JS REPL on the browser
-poetry run android-harness browser cdp --interactive
+poetry run harness-android browser cdp --interactive
 
 # 7 — Run a full recon against a target
-poetry run android-harness recon --url "https://target.example.com" -o recon.json
+poetry run harness-android recon --url "https://target.example.com" -o recon.json
 
 # 8 — Run a pentest script
-poetry run android-harness pentest run my_test.py --report findings.json
+poetry run harness-android pentest run my_test.py --report findings.json
 ```
 
 ---
@@ -51,7 +51,7 @@ The `setup` command downloads everything else for you: a portable OpenJDK 17, An
 ## CLI reference
 
 ```
-android-harness [-s SERIAL] <command> [options]
+harness-android [-s SERIAL] <command> [options]
 ```
 
 ### Global options
@@ -66,27 +66,27 @@ android-harness [-s SERIAL] <command> [options]
 Download SDK, accept licences, install platform-tools, emulator, system image.
 
 ```bash
-android-harness setup              # defaults to API 35 (Android 15)
-android-harness setup --api 34     # use Android 14 instead
+harness-android setup              # defaults to API 35 (Android 15)
+harness-android setup --api 34     # use Android 14 instead
 ```
 
 #### `create` / `delete`
 Create or delete an AVD (Android Virtual Device).
 
 ```bash
-android-harness create
-android-harness create --name my_phone --api 35 --device pixel_7 --force
-android-harness delete --name my_phone
+harness-android create
+harness-android create --name my_phone --api 35 --device pixel_7 --force
+harness-android delete --name my_phone
 ```
 
 #### `start`
 Boot the emulator. Automatically creates an AVD if none exists.
 
 ```bash
-android-harness start
-android-harness start --headless           # no window (CI)
-android-harness start --gpu host --ram 4096
-android-harness start --wipe               # fresh data
+harness-android start
+harness-android start --headless           # no window (CI)
+harness-android start --gpu host --ram 4096
+harness-android start --wipe               # fresh data
 ```
 
 #### `stop`
@@ -101,39 +101,39 @@ Show SDK/AVD paths and connected devices.
 Run shell commands on the device.
 
 ```bash
-android-harness shell ls /sdcard
-android-harness shell pm list packages
-android-harness shell dumpsys battery
+harness-android shell ls /sdcard
+harness-android shell pm list packages
+harness-android shell dumpsys battery
 ```
 
 #### `install`
 Install an APK.
 
 ```bash
-android-harness install my_app.apk
+harness-android install my_app.apk
 ```
 
 #### `screenshot`
 
 ```bash
-android-harness screenshot -o shot.png
+harness-android screenshot -o shot.png
 ```
 
 #### `push` / `pull`
 Transfer files.
 
 ```bash
-android-harness push local.txt /sdcard/local.txt
-android-harness pull /sdcard/photo.jpg ./photo.jpg
+harness-android push local.txt /sdcard/local.txt
+harness-android pull /sdcard/photo.jpg ./photo.jpg
 ```
 
 #### `input`
 Send touch / keyboard events.
 
 ```bash
-android-harness input tap 540 960
-android-harness input text "hello world"
-android-harness input key 4          # KEYCODE_BACK
+harness-android input tap 540 960
+harness-android input text "hello world"
+harness-android input key 4          # KEYCODE_BACK
 ```
 
 ### Browser control
@@ -142,7 +142,7 @@ android-harness input key 4          # KEYCODE_BACK
 Open a URL in Chrome via an Android intent.
 
 ```bash
-android-harness browser open "https://example.com"
+harness-android browser open "https://example.com"
 ```
 
 #### `browser cdp`
@@ -150,16 +150,16 @@ Full Chrome DevTools Protocol control. Enables CDP port forwarding, connects, an
 
 ```bash
 # Navigate and print the page title
-android-harness browser cdp --navigate "https://example.com" --title
+harness-android browser cdp --navigate "https://example.com" --title
 
 # Run JavaScript
-android-harness browser cdp --js "document.querySelectorAll('a').length"
+harness-android browser cdp --js "document.querySelectorAll('a').length"
 
 # Save a page-level screenshot
-android-harness browser cdp --page-screenshot page.png
+harness-android browser cdp --page-screenshot page.png
 
 # Interactive JS REPL
-android-harness browser cdp --interactive
+harness-android browser cdp --interactive
 ```
 
 ### Proxy & traffic interception
@@ -168,35 +168,35 @@ android-harness browser cdp --interactive
 Route emulator traffic through an intercepting proxy on the host.
 
 ```bash
-android-harness proxy enable                        # default: 10.0.2.2:8080
-android-harness proxy enable --host 10.0.2.2 --port 8080
-android-harness proxy disable
-android-harness proxy status
+harness-android proxy enable                        # default: 10.0.2.2:8080
+harness-android proxy enable --host 10.0.2.2 --port 8080
+harness-android proxy disable
+harness-android proxy status
 ```
 
 #### `proxy install-ca`
 Install a CA certificate for TLS interception.
 
 ```bash
-android-harness proxy install-ca --mitmproxy        # auto-find mitmproxy CA
-android-harness proxy install-ca --cert /path/to/burp-ca.pem
+harness-android proxy install-ca --mitmproxy        # auto-find mitmproxy CA
+harness-android proxy install-ca --cert /path/to/burp-ca.pem
 ```
 
 #### `proxy hosts`
 Manipulate `/etc/hosts` on the emulator for DNS spoofing.
 
 ```bash
-android-harness proxy hosts --add "10.0.2.2=api.target.local"
-android-harness proxy hosts                         # show current
-android-harness proxy hosts --reset
+harness-android proxy hosts --add "10.0.2.2=api.target.local"
+harness-android proxy hosts                         # show current
+harness-android proxy hosts --reset
 ```
 
 #### `proxy tcpdump`
 Capture raw packet traffic on the device.
 
 ```bash
-android-harness proxy tcpdump                       # start capture
-android-harness proxy tcpdump --stop -o traffic.pcap  # stop and pull pcap
+harness-android proxy tcpdump                       # start capture
+harness-android proxy tcpdump --stop -o traffic.pcap  # stop and pull pcap
 ```
 
 ### Reconnaissance
@@ -206,13 +206,13 @@ Automated reconnaissance against the current or specified page.
 
 ```bash
 # Full recon: fingerprint + spider + storage + CSP analysis
-android-harness recon --url "https://target.example.com" -o recon.json
+harness-android recon --url "https://target.example.com" -o recon.json
 
 # Individual modules
-android-harness recon --url "https://target.example.com" --fingerprint
-android-harness recon --url "https://target.example.com" --spider
-android-harness recon --url "https://target.example.com" --storage
-android-harness recon --url "https://target.example.com" --csp
+harness-android recon --url "https://target.example.com" --fingerprint
+harness-android recon --url "https://target.example.com" --spider
+harness-android recon --url "https://target.example.com" --storage
+harness-android recon --url "https://target.example.com" --csp
 ```
 
 **Fingerprint** detects: React, Angular, Vue, jQuery, Next.js, Nuxt, Svelte, Bootstrap, Tailwind, meta generator tags.
@@ -230,10 +230,10 @@ Inject JavaScript hooks that run before page scripts to capture browser API call
 
 ```bash
 # Install all hooks and capture for 30 seconds
-android-harness hooks --url "https://target.example.com" --wait 30 -o captured.json
+harness-android hooks --url "https://target.example.com" --wait 30 -o captured.json
 
 # Specific hooks only
-android-harness hooks --hooks fetch,xhr,forms --url "https://target.example.com"
+harness-android hooks --hooks fetch,xhr,forms --url "https://target.example.com"
 ```
 
 | Hook | What it captures |
@@ -254,7 +254,7 @@ android-harness hooks --hooks fetch,xhr,forms --url "https://target.example.com"
 Execute a Python pentest script with a rich context object.
 
 ```bash
-android-harness pentest run my_test.py --report findings.json
+harness-android pentest run my_test.py --report findings.json
 ```
 
 The script must define a `run(ctx)` function. The `ctx` (PentestContext) provides:
@@ -306,13 +306,13 @@ def run(ctx):
 
 ### Mojo IPC testing
 
-Chromium's Mojo IPC is the communication layer between the sandboxed renderer and privileged browser processes — a critical attack surface. android-harness can trace, trigger, and fuzz Mojo interfaces from outside the browser.
+Chromium's Mojo IPC is the communication layer between the sandboxed renderer and privileged browser processes — a critical attack surface. harness-android can trace, trigger, and fuzz Mojo interfaces from outside the browser.
 
 #### `mojo trigger`
 Exercise all 23 Mojo-backed Web APIs and see which interfaces are reachable:
 
 ```bash
-android-harness mojo trigger --url "https://target.example.com"
+harness-android mojo trigger --url "https://target.example.com"
 ```
 
 This calls APIs like Permissions, Clipboard, Geolocation, MediaDevices, WebUSB, WebBluetooth, StorageManager, IndexedDB, ServiceWorker, WakeLock, etc. — each one exercises a different `*.mojom.*` interface.
@@ -322,22 +322,22 @@ Capture a Chrome trace with Mojo IPC categories while triggering APIs:
 
 ```bash
 # Trace + trigger all APIs
-android-harness mojo trace --url "https://target.example.com" --trigger -o mojo.json
+harness-android mojo trace --url "https://target.example.com" --trigger -o mojo.json
 
 # Passive trace for 30 seconds (capture during manual interaction)
-android-harness mojo trace --duration 30 --verbose -o mojo.json
+harness-android mojo trace --duration 30 --verbose -o mojo.json
 
 # Save raw trace for chrome://tracing visualizer
-android-harness mojo trace --trigger --chrome-trace trace.json
+harness-android mojo trace --trigger --chrome-trace trace.json
 ```
 
 #### `mojo fuzz`
 Fuzz a specific Mojo-backed Web API with boundary inputs:
 
 ```bash
-android-harness mojo fuzz Clipboard.writeText --url "https://example.com"
-android-harness mojo fuzz StorageManager.estimate
-android-harness mojo fuzz Permissions.query -o fuzz_results.json
+harness-android mojo fuzz Clipboard.writeText --url "https://example.com"
+harness-android mojo fuzz StorageManager.estimate
+harness-android mojo fuzz Permissions.query -o fuzz_results.json
 ```
 
 Built-in fuzz payloads include: empty strings, megabyte-length strings, null, undefined, NaN, typed arrays, blobs, lone surrogates, null bytes, and more.
@@ -345,7 +345,7 @@ Built-in fuzz payloads include: empty strings, megabyte-length strings, null, un
 #### Python API
 
 ```python
-from android_harness.mojo import MojoTracer
+from harness_android.mojo import MojoTracer
 
 tracer = MojoTracer(browser, verbose=True)
 tracer.start_trace()
@@ -375,7 +375,7 @@ tracer.dump_chrome_trace("trace.json")
 ### High-level Device API
 
 ```python
-from android_harness.device import Device
+from harness_android.device import Device
 
 with Device(headless=True) as dev:
     dev.open_url("https://example.com")
@@ -390,8 +390,8 @@ with Device(headless=True) as dev:
 ### Lower-level access
 
 ```python
-from android_harness.adb import ADB
-from android_harness.browser import Browser
+from harness_android.adb import ADB
+from harness_android.browser import Browser
 
 adb = ADB(serial="emulator-5554")
 browser = Browser(adb)
@@ -404,12 +404,12 @@ browser.close()
 ### Pentest scripting API
 
 ```python
-from android_harness.adb import ADB
-from android_harness.browser import Browser
-from android_harness.hooks import Hooks
-from android_harness.intercept import Interceptor
-from android_harness.proxy import Proxy
-from android_harness.recon import full_recon, extract_storage
+from harness_android.adb import ADB
+from harness_android.browser import Browser
+from harness_android.hooks import Hooks
+from harness_android.intercept import Interceptor
+from harness_android.proxy import Proxy
+from harness_android.recon import full_recon, extract_storage
 
 adb = ADB(serial="emulator-5554")
 browser = Browser(adb)
@@ -464,7 +464,7 @@ browser.close()
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANDROID_HARNESS_HOME` | `~/.android-harness` | Root for harness data |
+| `ANDROID_HARNESS_HOME` | `~/.harness-android` | Root for harness data |
 | `ANDROID_HOME` / `ANDROID_SDK_ROOT` | (from harness home) | Use an existing SDK |
 
 ---
@@ -472,10 +472,10 @@ browser.close()
 ## Headless / CI usage
 
 ```bash
-android-harness setup --api 35
-android-harness start --headless --gpu swiftshader_indirect
-android-harness recon --url "https://target.example.com" -o recon.json
-android-harness stop
+harness-android setup --api 35
+harness-android start --headless --gpu swiftshader_indirect
+harness-android recon --url "https://target.example.com" -o recon.json
+harness-android stop
 ```
 
 Use `--gpu swiftshader_indirect` for software rendering in environments without GPU access.
@@ -485,14 +485,14 @@ Use `--gpu swiftshader_indirect` for software rendering in environments without 
 ## Project structure
 
 ```
-android-harness/
+harness-android/
 ├── pyproject.toml              # Poetry config, dependencies, entry point
 ├── README.md                   # This file
 ├── ARCHITECTURE.md             # Detailed design & data-flow docs
 ├── .gitignore
 ├── examples/
 │   └── example_pentest.py      # Sample pentest script
-└── android_harness/
+└── harness_android/
     ├── __init__.py
     ├── config.py               # Paths, platform detection, constants
     ├── sdk.py                  # JDK + SDK bootstrap & package management
@@ -515,7 +515,7 @@ android-harness/
 
 | Problem | Solution |
 |---|---|
-| `sdkmanager` not found | Run `android-harness setup` |
+| `sdkmanager` not found | Run `harness-android setup` |
 | Emulator won't start | Ensure hardware acceleration is available (WHPX / HAXM / Hypervisor.framework) |
 | `No inspectable page found` | Chrome may still be starting — `enable_cdp()` retries for 20s automatically |
 | CDP WebSocket 403 | Fixed automatically — harness writes `--remote-allow-origins=*` flag |

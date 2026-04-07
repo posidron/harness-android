@@ -1,12 +1,12 @@
 # Architecture
 
-This document describes the design, module structure, and data flows of android-harness.
+This document describes the design, module structure, and data flows of harness-android.
 
 ---
 
 ## Overview
 
-android-harness is a cross-platform (Windows/macOS) Android emulator harness built for browser penetration testing. It automates the entire stack: downloading a JDK and Android SDK, booting a QEMU-based emulator, establishing ADB communication, and providing Chrome browser control via the DevTools Protocol — all from Python.
+harness-android is a cross-platform (Windows/macOS) Android emulator harness built for browser penetration testing. It automates the entire stack: downloading a JDK and Android SDK, booting a QEMU-based emulator, establishing ADB communication, and providing Chrome browser control via the DevTools Protocol — all from Python.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -253,7 +253,7 @@ Runs on the device as a background process. Captures all interfaces. Pull the pc
                     └─────┼────────────────────────────┘
                           │
     ┌─────────────────────┼──────────────────────────────────────┐
-    │  android-harness    │                                      │
+    │  harness-android    │                                      │
     │                     │                                      │
     │  1. Tracing.start(categories=["mojom","ipc","toplevel"])   │
     │     → Chrome enables Mojo trace points                     │
