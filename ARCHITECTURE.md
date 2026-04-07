@@ -10,28 +10,28 @@ harness-android is a cross-platform (Windows/macOS) Android emulator harness bui
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     User: CLI / Python Script                          │
+│                      User: CLI / Python Script                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│   cli.py ─────► device.py ─────► pentest.py                            │
+│   cli.py ─────► device.py ─────► pentest.py                             │
 │     │               │                │                                  │
-│     │          ┌────┴────┐     ┌─────┴──────┐                          │
+│     │          ┌────┴────┐     ┌─────┴──────┐                           │
 │     │          │         │     │            │                           │
-│     ▼          ▼         ▼     ▼            ▼                          │
-│  emulator.py  adb.py  browser.py  hooks.py  intercept.py              │
+│     ▼          ▼         ▼     ▼            ▼                           │
+│  emulator.py  adb.py  browser.py  hooks.py  intercept.py                │
 │     │          │         │         │         │                          │
 │     │          │         │         │         │         proxy.py         │
 │     │          │         │         │         │           │              │
 │     ▼          ▼         ▼         ▼         ▼           ▼              │
-│  ┌──────────────────────────────────────────────────────────────┐      │
-│  │              Android Emulator (QEMU)                         │      │
-│  │  ┌─────────┐  ┌──────────┐  ┌──────────────────────────┐   │      │
-│  │  │ Android │  │   ADB    │  │  Chrome + DevTools socket │   │      │
-│  │  │  OS     │◄─┤  daemon  ├──┤  chrome_devtools_remote   │   │      │
-│  │  └─────────┘  └──────────┘  └──────────────────────────┘   │      │
-│  └──────────────────────────────────────────────────────────────┘      │
+│  ┌───────────────────────────────────────────────────────────────┐      │
+│  │              Android Emulator (QEMU)                          │      │
+│  │  ┌─────────┐  ┌──────────┐  ┌──────────────────────────┐      │      │
+│  │  │ Android │  │   ADB    │  │  Chrome + DevTools socket│      │      │
+│  │  │  OS     │◄─┤  daemon  ├──┤  chrome_devtools_remote  │      │      │
+│  │  └─────────┘  └──────────┘  └──────────────────────────┘      │      │
+│  └───────────────────────────────────────────────────────────────┘      │
 │                                                                         │
-│  sdk.py + config.py  (JDK bootstrap, SDK paths, platform detection)    │
+│  sdk.py + config.py  (JDK bootstrap, SDK paths, platform detection)     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -106,8 +106,8 @@ ADB is the primary control channel. All device interaction goes through it:
 Host                                        Emulator
 ┌───────────┐    WebSocket     ┌─────────────────────────────┐
 │ browser.py│ ──────────────►  │ Chrome                      │
-│           │    (port 9222)   │  └─ DevTools socket          │
-│           │ ◄──────────────  │     chrome_devtools_remote   │
+│           │    (port 9222)   │  └─ DevTools socket         │
+│           │ ◄──────────────  │     chrome_devtools_remote  │
 └───────────┘                  └─────────────────────────────┘
                     ▲
                     │  ADB forward (abstract socket → TCP)
@@ -136,8 +136,8 @@ CDP is used for everything above the ADB layer:
 ```
 Host                                          Emulator
 ┌────────────┐                   ┌──────────────────────────┐
-│ mitmproxy  │ ◄──── HTTP(S) ── │ All app traffic          │
-│ / Burp     │ ────────────────► │ (proxy = 10.0.2.2:8080) │
+│ mitmproxy  │ ◄──── HTTP(S) ──  │ All app traffic          │
+│ / Burp     │ ────────────────► │ (proxy = 10.0.2.2:8080)  │
 │ / ZAP      │                   └──────────────────────────┘
 └────────────┘
        │
@@ -155,11 +155,11 @@ For HTTPS interception, the proxy's CA cert must be installed in the device's tr
 ### 4. tcpdump (packet capture)
 
 ```
-Emulator                          Host
-┌──────────────┐    adb pull    ┌──────────────┐
-│ tcpdump -w   │ ────────────►  │ .pcap file   │
-│ /sdcard/*.pcap               │ (Wireshark)  │
-└──────────────┘                └──────────────┘
+Emulator                            Host
+┌────────────────┐    adb pull    ┌──────────────┐
+│ tcpdump -w     │ ────────────►  │ .pcap file   │
+│ /sdcard/*.pcap │                │ (Wireshark)  │
+└────────────────┘                └──────────────┘
 ```
 
 Runs on the device as a background process. Captures all interfaces. Pull the pcap for offline analysis.
@@ -241,15 +241,15 @@ Runs on the device as a background process. Captures all interfaces. Pull the pc
 ```
                            Chrome (in emulator)
                     ┌──────────────────────────────────┐
-                    │  Browser Process (privileged)     │
-                    │     ▲                             │
-                    │     │  Mojo IPC                   │
-                    │     ▼                             │
-                    │  Renderer Process (sandboxed)     │
-                    │     ▲                             │
-                    │     │  Web API call               │
-                    │     │  (Permissions, Clipboard,   │
-                    │     │   WebUSB, Geolocation, …)   │
+                    │  Browser Process (privileged)    │
+                    │     ▲                            │
+                    │     │  Mojo IPC                  │
+                    │     ▼                            │
+                    │  Renderer Process (sandboxed)    │
+                    │     ▲                            │
+                    │     │  Web API call              │
+                    │     │  (Permissions, Clipboard,  │
+                    │     │   WebUSB, Geolocation, …)  │
                     └─────┼────────────────────────────┘
                           │
     ┌─────────────────────┼──────────────────────────────────────┐
