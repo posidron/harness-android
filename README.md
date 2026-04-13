@@ -784,7 +784,8 @@ harness-android/
 ├── .gitignore
 ├── examples/
 │   ├── recon_pentest.py         # Recon plugin (fingerprint, spider, headers, CSP)
-│   └── mojo_pentest.py          # Mojo IPC plugin (trace, trigger, fuzz)
+│   ├── mojo_recon.py            # Mojo IPC recon (trace APIs, map attack surface)
+│   └── mojo_bindings_test.html  # MojoJS bindings test page (serve from gen/)
 └── harness_android/
     ├── __init__.py
     ├── config.py               # Paths, platform detection, config loading

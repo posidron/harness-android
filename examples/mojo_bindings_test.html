@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<!--
+  Example: Mojo IPC fuzzing via MojoJS bindings.
+
+  This file should be placed alongside (or served from the same root as) a
+  Chromium gen/ output directory so the mojom JS imports resolve.
+
+  Usage:
+    1. Build Chromium (or just the gen/ folder) for your target version.
+    2. Place this file next to the gen/ folder, or inside it.
+    3. Start the harness with MojoJS enabled and serve the folder:
+
+       harness-android mojo enable \
+         --gen-dir /path/to/chromium/out/Release \
+         --navigate "http://10.0.2.2:8089/examples/mojo_bindings_test.html" \
+         --interactive
+
+    4. Watch logcat for crashes:
+       harness-android logcat capture --duration 60 -o mojo_fuzz.log
+
+  Requirements:
+    - A debuggable Chromium build (install-chromium or custom build)
+    - MojoJS enabled (mojo enable handles this)
+    - The gen/ folder from the same Chromium version
+
+  What this does:
+    - Checks if Mojo bindings are available
+    - Demonstrates importing a mojom interface
+    - Shows how to bind to an interface and call methods
+    - Includes a basic fuzz loop that sends malformed messages
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MojoJS Bindings Test</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #0f0; padding: 20px; }
+    .pass { color: #0f0; }
+    .fail { color: #f00; }
+    .info { color: #0af; }
+    pre { white-space: pre-wrap; }
+    #log { max-height: 80vh; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h2>MojoJS Bindings Test</h2>
+  <div id="log"></div>
+  <script>
+    const logEl = document.getElementById('log');
+    function log(msg, cls = 'info') {
+      const line = document.createElement('div');
+      line.className = cls;
+      line.textContent = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
+      logEl.appendChild(line);
+      console.log(msg);
+    }
+
+    async function runTests() {
+      // ── Step 1: Check Mojo availability ──
+      log('Checking Mojo availability...');
+      if (typeof Mojo === 'undefined') {
+        log('FAIL: Mojo is not defined. Chrome was not started with --enable-blink-features=MojoJS,MojoJSTest', 'fail');
+        log('Run: harness-android mojo enable --interactive', 'fail');
+        return;
+      }
+      log('PASS: Mojo object is available', 'pass');
+      log(`Mojo.bindInterface: ${typeof Mojo.bindInterface}`, 'info');
+      log(`Mojo.createMessagePipe: ${typeof Mojo.createMessagePipe}`, 'info');
+      log(`MojoInterfaceInterceptor: ${typeof MojoInterfaceInterceptor}`, 'info');
+
+      // ── Step 2: Create a message pipe ──
+      log('Creating message pipe...');
+      try {
+        const pipe = Mojo.createMessagePipe();
+        log(`PASS: Message pipe created — handle0: ${pipe.handle0}, handle1: ${pipe.handle1}`, 'pass');
+        pipe.handle0.close();
+        pipe.handle1.close();
+      } catch (e) {
+        log(`FAIL: Could not create message pipe: ${e.message}`, 'fail');
+      }
+
+      // ── Step 3: Try binding to a known interface ──
+      // This demonstrates the pattern. Adjust the interface name to match
+      // your target. Common interfaces:
+      //   - blink.mojom.ClipboardHost
+      //   - blink.mojom.LockManager
+      //   - blink.mojom.StorageArea
+      //   - device.mojom.UsbDeviceManager
+      log('Attempting to bind blink.mojom.ClipboardHost...');
+      try {
+        const pipe = Mojo.createMessagePipe();
+        Mojo.bindInterface(
+          'blink.mojom.ClipboardHost',
+          pipe.handle1,
+          'context'  // 'context' = current frame, 'process' = browser process
+        );
+        log('PASS: Bound to blink.mojom.ClipboardHost', 'pass');
+
+        // The pipe.handle0 is now connected to the ClipboardHost implementation
+        // in the browser process. You can send raw Mojo messages to it.
+        // With the proper generated JS bindings, you'd use the typed API instead.
+        pipe.handle0.close();
+      } catch (e) {
+        log(`Could not bind ClipboardHost: ${e.message}`, 'info');
+      }
+
+      // ── Step 4: Demonstrate with generated bindings (if available) ──
+      // Uncomment and adjust the import path to match your gen/ layout:
+      //
+      // import {ClipboardHostRemote} from
+      //   '/gen/third_party/blink/public/mojom/clipboard/clipboard.mojom-webui.js';
+      //
+      // const remote = new ClipboardHostRemote();
+      // remote.$.bindNewPipeAndPassReceiver().bindInBrowser('context');
+      // const result = await remote.readText(0);  // system clipboard buffer
+      // log(`Clipboard contents: ${result.result}`);
+
+      // ── Step 5: Basic fuzz loop with raw messages ──
+      log('Starting basic IPC fuzz (raw message pipe)...');
+      const fuzzPayloads = [
+        new Uint8Array(0),                           // empty message
+        new Uint8Array(4),                           // too-short header
+        new Uint8Array(256).fill(0x41),              // oversized A's
+        new Uint8Array(256).fill(0xFF),              // all 0xFF
+        new Uint8Array([0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0]),  // null header
+        (() => { const a = new Uint8Array(1024); crypto.getRandomValues(a); return a; })(),  // random
+      ];
+
+      let crashCount = 0;
+      for (let i = 0; i < fuzzPayloads.length; i++) {
+        try {
+          const pipe = Mojo.createMessagePipe();
+          Mojo.bindInterface('blink.mojom.ClipboardHost', pipe.handle1, 'context');
+
+          // Write the raw fuzz payload directly to the pipe
+          const writer = pipe.handle0;
+          // Note: writeMessage is only available in test builds.
+          // In production, you'd use the typed remote API.
+          if (writer.writeMessage) {
+            writer.writeMessage(fuzzPayloads[i], []);
+            log(`  Sent payload #${i}: ${fuzzPayloads[i].length} bytes`, 'info');
+          } else {
+            log(`  writeMessage not available (need MojoJSTest feature)`, 'info');
+            writer.close();
+            break;
+          }
+          writer.close();
+        } catch (e) {
+          log(`  Payload #${i} error: ${e.message}`, 'fail');
+          crashCount++;
+        }
+      }
+
+      if (crashCount > 0) {
+        log(`Fuzz complete: ${crashCount} error(s) — check logcat for crashes`, 'fail');
+      } else {
+        log('Fuzz complete: no JS-level errors (check logcat for browser-process crashes)', 'pass');
+      }
+
+      log('Done. Run "harness-android logcat capture" to check for crashes.', 'info');
+    }
+
+    runTests();
+  </script>
+</body>
+</html>

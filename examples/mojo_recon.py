@@ -1,7 +1,13 @@
-"""Example: Mojo IPC pentest plugin.
+"""Example: Mojo IPC reconnaissance plugin.
 
-Traces Mojo IPC while exercising Web APIs, then analyzes the results.
-Run with: harness-android pentest run examples/mojo_pentest.py
+Enumerates reachable Mojo interfaces by triggering Web APIs and passively
+tracing IPC messages.  This is useful for **mapping the attack surface** —
+discovering which mojom interfaces are reachable from the renderer — but
+does NOT directly fuzz the IPC channel.
+
+For actual Mojo IPC fuzzing with MojoJS bindings, see mojo_bindings_test.html.
+
+Run with: harness-android pentest run examples/mojo_recon.py
 """
 
 
