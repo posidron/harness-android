@@ -41,7 +41,16 @@ def _find_serial(args: argparse.Namespace) -> str | None:
 def cmd_setup(args: argparse.Namespace) -> None:
     """Download the Android SDK, accept licences, install packages."""
     full_setup(args.api)
+    if args.install_chromium:
+        from harness_android.sdk import install_chromium
+        install_chromium()
     console.print("\n[bold green]Setup complete! Run `harness-android create` next.")
+
+
+def cmd_install_chromium(args: argparse.Namespace) -> None:
+    """Download and install Chromium (debuggable) on the running emulator."""
+    from harness_android.sdk import install_chromium
+    install_chromium()
 
 
 def cmd_create(args: argparse.Namespace) -> None:
@@ -58,15 +67,27 @@ def cmd_delete(args: argparse.Namespace) -> None:
 
 def cmd_start(args: argparse.Namespace) -> None:
     """Start the emulator."""
-    emu = Emulator(avd_name=args.name, api_level=args.api)
+    from harness_android.config import load_config
+    cfg = load_config().get("emulator", {})
+
+    # CLI flags override config file values; config overrides built-in defaults
+    name = args.name if args.name != DEFAULT_AVD_NAME else cfg.get("avd_name", DEFAULT_AVD_NAME)
+    api = args.api if args.api != DEFAULT_API_LEVEL else cfg.get("api_level", DEFAULT_API_LEVEL)
+    ram = args.ram if args.ram != 4096 else cfg.get("ram", 4096)
+    gpu = args.gpu if args.gpu != "auto" else cfg.get("gpu", "auto")
+    headless = args.headless or cfg.get("headless", False)
+
+    emu = Emulator(avd_name=name, api_level=api)
     if not emu.avd_exists():
-        console.print(f"[yellow]AVD '{args.name}' not found, creating …")
+        console.print(f"[yellow]AVD '{name}' not found, creating …")
         emu.create_avd(force=True)
     adb = emu.start(
-        headless=args.headless,
-        gpu=args.gpu,
-        ram=args.ram,
+        headless=headless,
+        gpu=gpu,
+        ram=ram,
         wipe_data=args.wipe,
+        cold_boot=getattr(args, "cold_boot", False),
+        no_snapshot_save=getattr(args, "no_snapshot_save", False),
     )
     info = {
         "serial": adb.get_serialno(),
@@ -500,6 +521,46 @@ def cmd_forensics_scan(args: argparse.Namespace) -> None:
     full_apk_scan(args.apk, output=args.output)
 
 
+def cmd_forensics_scan_app(args: argparse.Namespace) -> None:
+    """Pull an app's APK from the device by package name and run full forensic scan."""
+    import tempfile
+    from harness_android.forensics import full_apk_scan, extract_app_data, print_findings
+
+    adb = ADB(serial=_find_serial(args))
+    package = args.package
+
+    # Resolve APK path on device
+    console.print(f"[bold]Resolving APK path for {package} …")
+    result = adb.shell("pm", "path", package)
+    lines = [l.strip() for l in result.strip().splitlines() if l.strip().startswith("package:")]
+    if not lines:
+        console.print(f"[red]Package '{package}' not found on device.")
+        console.print("[dim]Tip: use `harness-android shell pm list packages` to see installed packages.")
+        return
+
+    apk_remote = lines[0].replace("package:", "")
+    console.print(f"[dim]Found: {apk_remote}")
+
+    # Pull APK to temp file
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False, prefix=f"{package}_") as tmp:
+        tmp_path = Path(tmp.name)
+    console.print(f"[bold]Pulling APK …")
+    adb.pull(apk_remote, tmp_path)
+
+    # Run full APK scan (secrets + manifest)
+    try:
+        full_apk_scan(str(tmp_path), output=args.output)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    # Also scan app data if requested
+    if args.app_data:
+        console.print(f"\n[bold]Also scanning app data …")
+        _, data_findings = extract_app_data(adb, package)
+        if data_findings:
+            print_findings(data_findings)
+
+
 def cmd_forensics_secrets(args: argparse.Namespace) -> None:
     from harness_android.forensics import scan_apk_secrets, print_findings
     findings = scan_apk_secrets(args.apk)
@@ -581,6 +642,167 @@ def cmd_forensics_installed(args: argparse.Namespace) -> None:
 
 
 # ======================================================================
+# WebView sub-command handlers
+# ======================================================================
+
+
+def cmd_webview_list(args: argparse.Namespace) -> None:
+    from harness_android.webview import enumerate_webviews, print_webviews
+    adb = ADB(serial=_find_serial(args))
+    webviews = enumerate_webviews(adb)
+    print_webviews(webviews)
+
+
+def cmd_webview_connect(args: argparse.Namespace) -> None:
+    from harness_android.webview import connect_webview
+    adb = ADB(serial=_find_serial(args))
+    browser = connect_webview(adb, args.socket, local_port=args.port)
+    console.print(f"[green]Connected to {args.socket} on localhost:{args.port}")
+
+    # Enable CDP domains so Runtime.evaluate etc. work reliably.
+    browser.enable_domains()
+
+    # Navigate FIRST — the initial page (e.g. chrome://newtab) may not
+    # have a functioning JS context.
+    if args.navigate:
+        browser.navigate(args.navigate)
+        import time; time.sleep(3)  # let the page load
+
+    # Now it's safe to query page info.
+    try:
+        title = browser.get_page_title()
+        url = browser.get_page_url()
+        console.print(f"Page: {title} — {url}")
+    except Exception:  # noqa: BLE001
+        console.print("[dim]Could not read page title (page may still be loading)")
+
+    if args.js:
+        result = browser.evaluate_js(args.js)
+        console.print(json.dumps(result, indent=2, default=str))
+
+    if args.title:
+        console.print(f"Page title: {browser.get_page_title()}")
+
+    if args.page_screenshot:
+        browser.page_screenshot(args.page_screenshot)
+
+    if args.interactive:
+        console.print("[bold]Interactive CDP REPL — type JS (or 'quit'):")
+        while True:
+            try:
+                expr = input("cdp> ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if expr.strip().lower() in ("quit", "exit"):
+                break
+            try:
+                result = browser.evaluate_js(expr)
+                console.print(json.dumps(result, indent=2, default=str))
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[red]{exc}")
+
+    browser.close()
+
+
+# ======================================================================
+# Intent sub-command handlers
+# ======================================================================
+
+
+def cmd_intent_enumerate(args: argparse.Namespace) -> None:
+    from harness_android.intents import IntentFuzzer
+    adb = ADB(serial=_find_serial(args))
+    fuzzer = IntentFuzzer(adb)
+    components = fuzzer.enumerate_exported(args.package)
+    fuzzer.print_components(components)
+
+
+def cmd_intent_fuzz(args: argparse.Namespace) -> None:
+    from harness_android.intents import IntentFuzzer
+    adb = ADB(serial=_find_serial(args))
+    fuzzer = IntentFuzzer(adb)
+    results = fuzzer.fuzz_package(args.package)
+    fuzzer.print_results(results)
+    if args.output:
+        fuzzer.dump_results(results, args.output)
+
+
+# ======================================================================
+# Logcat sub-command handlers
+# ======================================================================
+
+
+def cmd_logcat_crashes(args: argparse.Namespace) -> None:
+    from harness_android.logcat import LogcatCapture
+    adb = ADB(serial=_find_serial(args))
+    logcat = LogcatCapture(adb)
+    crashes = logcat.find_crashes(args.file)
+    logcat.print_crashes(crashes)
+    if args.output:
+        logcat.dump_crashes(crashes, args.output)
+
+
+def cmd_logcat_stream(args: argparse.Namespace) -> None:
+    """Stream live logcat to terminal."""
+    import subprocess
+    from harness_android.config import get_adb
+    adb_bin = str(get_adb())
+    serial = _find_serial(args)
+
+    # Clear the buffer first so we only see new logs
+    clear_cmd = [adb_bin]
+    if serial:
+        clear_cmd += ["-s", serial]
+    clear_cmd += ["logcat", "-c"]
+    subprocess.run(clear_cmd, capture_output=True)
+
+    cmd = [adb_bin]
+    if serial:
+        cmd += ["-s", serial]
+    cmd += ["logcat", "-v", "threadtime"]
+    if args.tag:
+        cmd += ["-s", args.tag]
+    if args.level:
+        cmd += ["*:" + args.level.upper()]
+    console.print(f"[bold]Streaming logcat (Ctrl+C to stop) …")
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_logcat_capture(args: argparse.Namespace) -> None:
+    """Capture logcat, save to file, auto-scan for crashes."""
+    import time
+    from harness_android.logcat import LogcatCapture
+    adb = ADB(serial=_find_serial(args))
+    logcat = LogcatCapture(adb)
+    logcat.start()
+    duration = args.duration
+    if duration > 0:
+        console.print(f"[bold]Capturing logcat for {duration}s …")
+        try:
+            time.sleep(duration)
+        except KeyboardInterrupt:
+            pass
+    else:
+        console.print("[bold]Capturing logcat (Ctrl+C to stop) …")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    path = logcat.stop(args.output)
+    console.print(f"[green]Logcat saved to {path}")
+    crashes = logcat.find_crashes(str(path))
+    if crashes:
+        logcat.print_crashes(crashes)
+        console.print(f"[bold red]{len(crashes)} crash(es) detected!")
+    else:
+        console.print("[green]No crashes detected.")
+
+
+# ======================================================================
 # Parser construction
 # ======================================================================
 
@@ -598,7 +820,13 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- setup ----
     p = sub.add_parser("setup", help="Download SDK and system images")
     p.add_argument("--api", type=int, default=DEFAULT_API_LEVEL, help="API level")
+    p.add_argument("--install-chromium", action="store_true",
+                    help="Also install Chromium (debuggable) for CDP on API 35+")
     p.set_defaults(func=cmd_setup)
+
+    # ---- install-chromium ----
+    p = sub.add_parser("install-chromium", help="Download and install Chromium (debuggable) on emulator")
+    p.set_defaults(func=cmd_install_chromium)
 
     # ---- create ----
     p = sub.add_parser("create", help="Create an AVD")
@@ -619,8 +847,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--api", type=int, default=DEFAULT_API_LEVEL)
     p.add_argument("--headless", action="store_true", help="No GUI window")
     p.add_argument("--gpu", default="auto", help="GPU mode (auto|host|swiftshader_indirect|off)")
-    p.add_argument("--ram", type=int, default=2048, help="RAM in MB")
-    p.add_argument("--wipe", action="store_true", help="Wipe user data")
+    p.add_argument("--ram", type=int, default=4096, help="RAM in MB (default: 4096)")
+    p.add_argument("--wipe", action="store_true", help="Wipe user data + cold boot")
+    p.add_argument("--cold-boot", action="store_true", help="Force cold boot, ignore saved snapshot")
+    p.add_argument("--no-snapshot-save", action="store_true", help="Don't save snapshot on exit")
     p.set_defaults(func=cmd_start)
 
     # ---- stop ----
@@ -791,6 +1021,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", help="Save report to JSON")
     p.set_defaults(func=cmd_forensics_scan)
 
+    p = fsub.add_parser("scan-app", help="Pull APK from device by package name and scan (emulator required)")
+    p.add_argument("package", help="Package name (e.g. com.android.chrome)")
+    p.add_argument("-o", "--output", help="Save report to JSON")
+    p.add_argument("--app-data", action="store_true", help="Also scan app's private data")
+    p.set_defaults(func=cmd_forensics_scan_app)
+
     p = fsub.add_parser("secrets", help="Scan APK for hardcoded secrets (local, no emulator needed)")
     p.add_argument("apk", help="Path to .apk file")
     p.add_argument("-o", "--output", help="Save findings to JSON")
@@ -809,6 +1045,51 @@ def build_parser() -> argparse.ArgumentParser:
     p = fsub.add_parser("installed", help="Pull and scan all 3rd-party APKs (emulator required)")
     p.add_argument("-o", "--output", help="Save combined report to JSON")
     p.set_defaults(func=cmd_forensics_installed)
+
+    # ---- webview ----
+    webview_sub = sub.add_parser("webview", help="WebView enumeration and control")
+    wvsub = webview_sub.add_subparsers(dest="webview_cmd", required=True)
+
+    p = wvsub.add_parser("list", help="List all debuggable WebViews on device")
+    p.set_defaults(func=cmd_webview_list)
+
+    p = wvsub.add_parser("connect", help="Connect to a WebView by socket name")
+    p.add_argument("socket", help="Socket name (from webview list)")
+    p.add_argument("--port", type=int, default=9333, help="Local port to forward")
+    p.add_argument("--navigate", help="Navigate to URL")
+    p.add_argument("--js", help="Evaluate JavaScript expression")
+    p.add_argument("--title", action="store_true", help="Print page title")
+    p.add_argument("--page-screenshot", metavar="FILE", help="Save page screenshot")
+    p.add_argument("--interactive", action="store_true", help="Interactive JS REPL")
+    p.set_defaults(func=cmd_webview_connect)
+
+    # ---- intents ----
+    intent_sub = sub.add_parser("intent", help="Intent fuzzing")
+    itsub = intent_sub.add_subparsers(dest="intent_cmd", required=True)
+
+    p = itsub.add_parser("enumerate", help="List exported components of a package")
+    p.add_argument("package", help="Package name")
+    p.set_defaults(func=cmd_intent_enumerate)
+
+    p = itsub.add_parser("fuzz", help="Fuzz exported components with smart payloads")
+    p.add_argument("package", help="Package name")
+    p.add_argument("-o", "--output", help="Save results to JSON")
+    p.set_defaults(func=cmd_intent_fuzz)
+
+    # ---- logcat ----
+    logcat_sub = sub.add_parser("logcat", help="Logcat capture and crash detection")
+    lcsub = logcat_sub.add_subparsers(dest="logcat_cmd", required=True)
+
+    p = lcsub.add_parser("stream", help="Stream live logcat to terminal")
+    p.add_argument("--tag", "-t", help="Filter by tag (e.g. chromium, ActivityManager)")
+    p.add_argument("--level", "-l", help="Min log level: V, D, I, W, E, F")
+    p.set_defaults(func=cmd_logcat_stream)
+
+    p = lcsub.add_parser("capture", help="Capture logcat, auto-scan for crashes (ASan, SIGSEGV, ANR, etc.)")
+    p.add_argument("--duration", "-d", type=int, default=30, help="Seconds to capture (default: 30, 0=until Ctrl+C)")
+    p.add_argument("-o", "--output", default="logcat.txt", help="Save logcat to file")
+    p.add_argument("--crashes-only", action="store_true", help="Only show detected crashes, not the full log")
+    p.set_defaults(func=cmd_logcat_capture)
 
     return parser
 

@@ -66,8 +66,9 @@ SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern("Base64 Encoded Key", re.compile(r"(?i)(?:key|secret|password|token)[\s]*[=:]\s*[\"']([A-Za-z0-9+/]{40,}={0,2})[\"']"), "medium"),
     SecretPattern("Azure Storage Key", re.compile(r"(?i)DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{44,}"), "critical"),
     SecretPattern("Azure Connection String", re.compile(r"(?i)(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/=]{44,}"), "high"),
-    SecretPattern("Hardcoded IP Address", re.compile(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}\b"), "low"),
+    SecretPattern("Hardcoded IP Address", re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"), "low"),
     SecretPattern("Hardcoded URL with Credentials", re.compile(r"https?://[^:]+:[^@]+@[^\s\"']+"), "critical"),
+
 ]
 
 
