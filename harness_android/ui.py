@@ -264,7 +264,9 @@ def run_monkey(
         + f" (throttle={throttle_ms}ms)"
     )
 
-    output = adb.shell(*cmd_parts)
+    # Estimate runtime: events * throttle + 60s overhead margin
+    estimated_seconds = (event_count * throttle_ms) // 1000 + 60
+    output = adb.shell(*cmd_parts, timeout=max(estimated_seconds, 120))
 
     # Parse results
     crashes = output.count("// CRASH:") + output.count("FATAL EXCEPTION")
