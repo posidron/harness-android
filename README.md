@@ -393,13 +393,11 @@ Built-in fuzz payloads include: empty strings, megabyte-length strings, null, un
 Pass arbitrary command-line flags to Chrome via `browser cdp --chrome-flags`:
 
 ```bash
-# Single flag (use = to avoid shell/argparse confusion with --)
+# Single flag
 harness-android browser cdp --chrome-flags="--disable-web-security" --interactive
 
-# Multiple flags
-harness-android browser cdp \
-  --chrome-flags="--enable-blink-features=MojoJS" \
-  --chrome-flags="--disable-site-isolation-trials"
+# Multiple flags in one string
+harness-android browser cdp --chrome-flags="--enable-blink-features=MojoJS --disable-site-isolation-trials --v=1" --interactive
 ```
 
 Flags can also be set in `harness.json`:
