@@ -360,6 +360,23 @@ harness-android mojo enable --gen-dir ./gen --navigate "http://10.0.2.2:8089/tes
 harness-android mojo enable --interactive
 ```
 
+A ready-to-use test page is included at `examples/mojo_bindings_test.html` — it checks Mojo availability, creates message pipes, binds to `blink.mojom.ClipboardHost`, and runs a basic raw-message fuzz loop. Copy it into your Chromium output directory and navigate to it:
+
+```bash
+harness-android mojo enable \
+  --gen-dir /path/to/chromium/out/Release \
+  --navigate "http://10.0.2.2:8089/examples/mojo_bindings_test.html"
+
+# Monitor for crashes in another terminal:
+harness-android logcat capture --duration 60 -o mojo_fuzz.log
+```
+
+For passive recon (mapping which interfaces are reachable without MojoJS), use the `examples/mojo_recon.py` pentest plugin:
+
+```bash
+harness-android pentest run examples/mojo_recon.py
+```
+
 The `gen/` folder is served over HTTP from the host. Chrome on the emulator loads it from `http://10.0.2.2:8089/`. Your test HTML can then:
 
 ```html
