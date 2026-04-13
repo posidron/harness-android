@@ -65,6 +65,7 @@ _DEFAULT_CONFIG = {
         "package": "com.android.chrome",
         "activity": "com.google.android.apps.chrome.Main",
         "cdp_port": CDP_LOCAL_PORT,
+        "chrome_flags": [],
     },
     "proxy": {
         "host": "10.0.2.2",
