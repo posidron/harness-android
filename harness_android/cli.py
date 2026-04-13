@@ -1031,7 +1031,7 @@ def build_parser() -> argparse.ArgumentParser:
     # browser cdp
     p = bsub.add_parser("cdp", help="Chrome DevTools Protocol control")
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT, help="Local CDP port")
-    p.add_argument("--chrome-flags", action="append", help='Extra Chrome flags (e.g. "--enable-blink-features=MojoJS")')
+    p.add_argument("--chrome-flags", action="append", metavar="FLAG", help='Extra Chrome flag (use = syntax: --chrome-flags="--disable-web-security")')
     p.add_argument("--navigate", "-n", help="Navigate to URL")
     p.add_argument("--js", "-j", help="Evaluate JavaScript expression")
     p.add_argument("--title", action="store_true", help="Print page title")
@@ -1149,7 +1149,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT, help="Local CDP port")
     p.add_argument("--gen-dir", help="Path to Chromium gen/ folder to serve via HTTP")
     p.add_argument("--serve-port", type=int, default=8089, help="HTTP port for gen/ (default: 8089)")
-    p.add_argument("--chrome-flags", action="append", help="Additional Chrome flags")
+    p.add_argument("--chrome-flags", action="append", metavar="FLAG", help='Extra Chrome flag (use = syntax: --chrome-flags="--flag")')
     p.add_argument("--navigate", "-n", help="Navigate to URL after enabling")
     p.add_argument("--interactive", "-i", action="store_true", help="Enter Mojo JS REPL")
     p.set_defaults(func=cmd_mojo_enable)
