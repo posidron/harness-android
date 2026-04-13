@@ -803,6 +803,57 @@ def cmd_logcat_capture(args: argparse.Namespace) -> None:
 
 
 # ======================================================================
+# UI automation sub-command handlers
+# ======================================================================
+
+
+def cmd_ui_dump(args: argparse.Namespace) -> None:
+    from harness_android.ui import dump_hierarchy, print_hierarchy, print_clickable
+    adb = ADB(serial=_find_serial(args))
+    root = dump_hierarchy(adb)
+    if args.clickable:
+        print_clickable(root)
+    else:
+        print_hierarchy(root, max_depth=args.depth)
+
+
+def cmd_ui_tap(args: argparse.Namespace) -> None:
+    from harness_android.ui import dump_hierarchy, tap_element, tap_by_resource_id
+    adb = ADB(serial=_find_serial(args))
+    root = dump_hierarchy(adb)
+    if args.resource_id:
+        tap_by_resource_id(adb, root, args.resource_id)
+    else:
+        tap_element(adb, root, args.text)
+
+
+def cmd_ui_type(args: argparse.Namespace) -> None:
+    from harness_android.ui import dump_hierarchy, type_into
+    adb = ADB(serial=_find_serial(args))
+    root = dump_hierarchy(adb)
+    type_into(adb, root, args.resource_id, args.text)
+
+
+def cmd_ui_monkey(args: argparse.Namespace) -> None:
+    from harness_android.ui import run_monkey
+    adb = ADB(serial=_find_serial(args))
+    output = run_monkey(
+        adb,
+        package=args.package,
+        event_count=args.count,
+        seed=args.seed,
+        throttle_ms=args.throttle,
+        ignore_crashes=args.ignore_crashes,
+        ignore_timeouts=args.ignore_timeouts,
+        verbose=args.verbose,
+    )
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(output)
+        console.print(f"[green]Monkey output saved to {args.output}")
+
+
+# ======================================================================
 # Parser construction
 # ======================================================================
 
@@ -1090,6 +1141,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", default="logcat.txt", help="Save logcat to file")
     p.add_argument("--crashes-only", action="store_true", help="Only show detected crashes, not the full log")
     p.set_defaults(func=cmd_logcat_capture)
+
+    # ---- ui ----
+    ui_sub = sub.add_parser("ui", help="UI automation (UIAutomator, smart tap, monkey)")
+    uisub = ui_sub.add_subparsers(dest="ui_cmd", required=True)
+
+    p = uisub.add_parser("dump", help="Dump the screen UI hierarchy")
+    p.add_argument("--clickable", action="store_true", help="Only show clickable elements (table view)")
+    p.add_argument("--depth", type=int, default=10, help="Max tree depth (default: 10)")
+    p.set_defaults(func=cmd_ui_dump)
+
+    p = uisub.add_parser("tap", help="Tap an element by text or resource-id")
+    p.add_argument("--text", help="Tap element matching this visible text")
+    p.add_argument("--resource-id", help="Tap element matching this resource-id")
+    p.set_defaults(func=cmd_ui_tap)
+
+    p = uisub.add_parser("type", help="Tap a field by resource-id and type text")
+    p.add_argument("resource_id", help="Resource ID of the text field")
+    p.add_argument("text", help="Text to type")
+    p.set_defaults(func=cmd_ui_type)
+
+    p = uisub.add_parser("monkey", help="Run monkey random event stress test")
+    p.add_argument("-p", "--package", help="Restrict to this package")
+    p.add_argument("-n", "--count", type=int, default=5000, help="Number of events (default: 5000)")
+    p.add_argument("--seed", type=int, help="Random seed for reproducible runs")
+    p.add_argument("--throttle", type=int, default=50, help="Delay between events in ms (default: 50)")
+    p.add_argument("--ignore-crashes", action="store_true", help="Continue after crashes")
+    p.add_argument("--ignore-timeouts", action="store_true", help="Continue after ANRs")
+    p.add_argument("-v", "--verbose", type=int, default=0, help="Verbosity 0-3")
+    p.add_argument("-o", "--output", help="Save monkey output to file")
+    p.set_defaults(func=cmd_ui_monkey)
 
     return parser
 
