@@ -202,7 +202,9 @@ def cmd_browser_cdp(args: argparse.Namespace) -> None:
         browser.page_screenshot(args.page_screenshot)
 
     if args.interactive:
-        console.print("[bold]Interactive CDP REPL — type JS (or 'quit'):")
+        console.print("[bold]Interactive CDP REPL[/bold] — evaluate JavaScript in the page context.")
+        console.print("[dim]  Try: document.title, navigator.userAgent, document.querySelectorAll('a').length")
+        console.print("[dim]  Type 'quit' or Ctrl+C to exit.")
         while True:
             try:
                 expr = input("cdp> ")
@@ -689,7 +691,9 @@ def cmd_webview_connect(args: argparse.Namespace) -> None:
         browser.page_screenshot(args.page_screenshot)
 
     if args.interactive:
-        console.print("[bold]Interactive CDP REPL — type JS (or 'quit'):")
+        console.print("[bold]Interactive CDP REPL[/bold] — evaluate JavaScript in the page context.")
+        console.print("[dim]  Try: document.title, navigator.userAgent, document.querySelectorAll('a').length")
+        console.print("[dim]  Type 'quit' or Ctrl+C to exit.")
         while True:
             try:
                 expr = input("cdp> ")
@@ -908,7 +912,9 @@ def cmd_mojo_enable(args: argparse.Namespace) -> None:
         browser.navigate(args.navigate)
 
     if args.interactive:
-        console.print("[bold]Interactive CDP REPL — type JS (or 'quit'):")
+        console.print("[bold]Mojo JS REPL[/bold] — evaluate JavaScript (MojoJS bindings enabled).")
+        console.print("[dim]  Try: typeof Mojo, Mojo.bindInterface, navigator.userAgent")
+        console.print("[dim]  Type 'quit' or Ctrl+C to exit.")
         while True:
             try:
                 expr = input("mojo> ")
