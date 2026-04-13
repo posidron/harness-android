@@ -318,7 +318,41 @@ def run(ctx):
 
 ### Mojo IPC testing
 
-Chromium's Mojo IPC is the communication layer between the sandboxed renderer and privileged browser processes — a critical attack surface. harness-android can trace, trigger, and fuzz Mojo interfaces from outside the browser.
+Chromium's Mojo IPC is the communication layer between the sandboxed renderer and privileged browser processes — a critical attack surface. harness-android supports two approaches:
+
+1. **Passive tracing** — trace, trigger, and fuzz Mojo interfaces from outside via CDP Tracing
+2. **MojoJS bindings** — enable `Mojo.bindInterface()` in JS so you can call any Mojo interface directly
+
+#### `mojo enable` (MojoJS bindings)
+
+Restart Chrome with `--enable-blink-features=MojoJS,MojoJSTest` and optionally serve your Chromium `gen/` folder so the emulator can load the mojom JS bindings:
+
+```bash
+# Enable MojoJS + serve gen/ folder from a local Chromium build
+harness-android mojo enable --gen-dir /path/to/chromium/out/Release/gen --interactive
+
+# Enable and navigate directly to your test page
+harness-android mojo enable --gen-dir ./gen --navigate "http://10.0.2.2:8089/test.html"
+
+# Just enable MojoJS (no gen/ serving)
+harness-android mojo enable --interactive
+```
+
+The `gen/` folder is served over HTTP from the host. Chrome on the emulator loads it from `http://10.0.2.2:8089/`. Your test HTML can then:
+
+```html
+<script type="module">
+  // Import the generated mojom bindings from the served gen/ folder
+  import {ClipboardHost, ClipboardHostRemote}
+    from '/third_party/blink/public/mojom/clipboard/clipboard.mojom-webui.js';
+
+  // Bind to the interface
+  const clipboard = ClipboardHostRemote.getNewPipeAndPassReceiver();
+  // ... call methods on the interface
+</script>
+```
+
+> **Requirements:** MojoJS bindings require a **debuggable** Chrome/Chromium build. Release Chrome won't have these bindings available. Use `harness-android install-chromium` to install a debuggable Chromium build.
 
 #### `mojo trigger`
 Exercise all 23 Mojo-backed Web APIs and see which interfaces are reachable:
@@ -354,6 +388,39 @@ harness-android mojo fuzz Permissions.query -o fuzz_results.json
 
 Built-in fuzz payloads include: empty strings, megabyte-length strings, null, undefined, NaN, typed arrays, blobs, lone surrogates, null bytes, and more.
 
+### Chrome flags
+
+Pass arbitrary command-line flags to Chrome via `browser cdp --chrome-flags`:
+
+```bash
+# Single flag
+harness-android browser cdp --chrome-flags "--disable-web-security" --interactive
+
+# Multiple flags
+harness-android browser cdp \
+  --chrome-flags "--enable-blink-features=MojoJS" \
+  --chrome-flags "--disable-site-isolation-trials"
+```
+
+Flags can also be set in `harness.json`:
+
+```json
+{
+  "browser": {
+    "chrome_flags": ["--enable-logging", "--v=1"]
+  }
+}
+```
+
+### File server
+
+Serve any local directory to the emulator over HTTP (the emulator sees the host as `10.0.2.2`):
+
+```bash
+harness-android serve ./my_test_pages --port 8089
+# Chrome on emulator → http://10.0.2.2:8089/index.html
+```
+
 #### Python API
 
 ```python
@@ -378,6 +445,12 @@ fuzz_results = tracer.fuzz_api(
 # Save for offline analysis / chrome://tracing
 tracer.dump("analysis.json", events, messages, results)
 tracer.dump_chrome_trace("trace.json")
+
+# Serve files to the emulator
+from harness_android.fileserver import FileServer
+with FileServer("/path/to/gen", port=8089) as server:
+    browser.navigate(server.emulator_url + "/test.html")
+    # ...
 ```
 
 ### APK forensics
@@ -711,6 +784,7 @@ harness-android/
     ├── intents.py              # Intent fuzzing (exported components, deep links)
     ├── webview.py              # WebView enumeration + CDP connection
     ├── ui.py                   # UIAutomator dump, smart tap, monkey testing
+    ├── fileserver.py           # HTTP file server (serve gen/ to emulator)
     └── cli.py                  # argparse CLI (all commands)
 ```
 

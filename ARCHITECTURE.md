@@ -75,12 +75,13 @@ harness-android is a cross-platform (Windows/macOS) Android emulator harness bui
 | **intents.py** | Intent fuzzing for exported components. Parses AndroidManifest.xml for exported activities/services/receivers, generates type-appropriate payloads (strings, URIs, numbers, booleans), monitors logcat for crashes after each fuzz attempt. |
 | **webview.py** | Enumerates debuggable WebView sockets via `/proc/net/unix`. `connect_webview()` establishes a CDP connection to any listed WebView. Auto-detects `chrome_devtools_remote` for full `enable_cdp()` flow. |
 | **ui.py** | **UIAutomator**: dumps screen hierarchy via `uiautomator dump`, parses XML into element tree with bounds/text/resource-id/class. Find helpers: `find_by_text()`, `find_by_resource_id()`, `find_by_content_desc()`, `find_clickable()`. **Smart tap**: `tap_element()` locates element by text and taps its computed centre. **Monkey**: `run_monkey()` wraps the `monkey` random event generator with crash/ANR parsing. |
+| **fileserver.py** | Simple HTTP server that serves a local directory to the emulator (host = `10.0.2.2`). Used to serve Chromium `gen/` folders with MojoJS bindings without pushing files to the device. Context manager support (`with FileServer(...) as server`). |
 
 ### CLI layer
 
 | Module | Responsibility |
 |---|---|
-| **cli.py** | argparse-based CLI. 30+ commands across 13 groups: emulator management (setup, install-chromium, create, delete, start, stop, status), device control (shell, install, screenshot, push, pull, input), browser (open, cdp), proxy (enable, disable, status, install-ca, tcpdump, hosts), recon, hooks, pentest (run), mojo (trace, trigger, fuzz), forensics (scan, secrets, manifest, scan-app, app-data, installed), intent (enumerate, fuzz), logcat (stream, capture), webview (list, connect), ui (dump, tap, type, monkey). |
+| **cli.py** | argparse-based CLI. 30+ commands across 14 groups: emulator management (setup, install-chromium, create, delete, start, stop, status), device control (shell, install, screenshot, push, pull, input), browser (open, cdp with --chrome-flags), proxy (enable, disable, status, install-ca, tcpdump, hosts), recon, hooks, pentest (run), mojo (trace, trigger, fuzz, enable), forensics (scan, secrets, manifest, scan-app, app-data, installed), intent (enumerate, fuzz), logcat (stream, capture), webview (list, connect), ui (dump, tap, type, monkey), serve. |
 
 ---
 
