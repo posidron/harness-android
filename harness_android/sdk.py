@@ -23,6 +23,7 @@ from harness_android.config import (
     IS_WINDOWS,
     PLATFORM,
     get_cmdline_tools_url,
+    get_harness_home,
     get_java_home,
     get_jdk_root,
     get_jdk_url,
@@ -197,3 +198,57 @@ def full_setup(api_level: int) -> Path:
     accept_licenses()
     install_packages(api_level)
     return sdk_root
+
+
+def download_chromium_apk() -> Path:
+    """Download the latest Chromium snapshot APK (debuggable, supports CDP).
+
+    Chromium snapshot builds have ``android:debuggable=true`` so they read
+    command-line flags from ``/data/local/tmp/chromium-command-line``.
+    This is required for CDP on API 35+ where release Chrome ignores flags.
+    """
+    # Chromium's continuous build — latest x86_64 APK
+    # The LAST_CHANGE file gives the latest build number
+    console.print("[bold]Downloading latest Chromium snapshot APK …")
+    last_change_url = "https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Android%2FLAST_CHANGE?alt=media"
+    try:
+        resp = requests.get(last_change_url, timeout=30)
+        resp.raise_for_status()
+        build = resp.text.strip()
+    except Exception as exc:
+        raise RuntimeError(f"Could not fetch Chromium build number: {exc}") from exc
+
+    apk_url = (
+        f"https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots"
+        f"/o/Android%2F{build}%2Fchrome-android.zip?alt=media"
+    )
+    console.print(f"[dim]Build: {build}")
+    data = _download_with_progress(apk_url)
+
+    # Extract APK from the zip
+    harness_home = get_harness_home()
+    chromium_dir = harness_home / "chromium"
+    chromium_dir.mkdir(parents=True, exist_ok=True)
+    apk_path = chromium_dir / "ChromePublic.apk"
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        # The zip contains chrome-android/apks/ChromePublic.apk
+        for info in zf.infolist():
+            if info.filename.endswith("ChromePublic.apk"):
+                apk_path.write_bytes(zf.read(info))
+                console.print(f"[green]Chromium APK saved to {apk_path}")
+                return apk_path
+
+    raise RuntimeError("ChromePublic.apk not found in Chromium snapshot zip")
+
+
+def install_chromium(adb_path: Path | None = None) -> None:
+    """Download and install Chromium on the running emulator."""
+    from harness_android.config import get_adb
+    from harness_android.adb import ADB
+
+    apk_path = download_chromium_apk()
+    adb = ADB()
+    console.print("[bold]Installing Chromium on emulator …")
+    adb.install(apk_path, replace=True)
+    console.print("[green]Chromium installed! CDP will now use org.chromium.chrome.")

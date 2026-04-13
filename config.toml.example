@@ -1,0 +1,40 @@
+# harness-android configuration
+#
+# Copy this file as:
+#   ./harness.json          (project-local, takes priority)
+#   ~/.android-harness/config.json (user-global)
+#
+# CLI flags override config file values.
+# Config file overrides built-in defaults.
+#
+# Example harness.json:
+#
+# {
+#   "emulator": {
+#     "ram": 4096,
+#     "gpu": "auto",
+#     "avd_name": "harness_device",
+#     "api_level": 35,
+#     "device_profile": "pixel_7",
+#     "headless": false,
+#     "no_boot_anim": true
+#   },
+#   "browser": {
+#     "package": "com.android.chrome",
+#     "activity": "com.google.android.apps.chrome.Main",
+#     "cdp_port": 9222
+#   },
+#   "proxy": {
+#     "host": "10.0.2.2",
+#     "port": 8080
+#   }
+# }
+#
+# For Chromium (debuggable, required for CDP on API 35+):
+#   "browser": { "package": "org.chromium.chrome" }
+#
+# For Edge:
+#   "browser": { "package": "com.microsoft.emmx" }
+#
+# For CI (headless + software rendering):
+#   "emulator": { "headless": true, "gpu": "swiftshader_indirect" }

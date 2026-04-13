@@ -124,8 +124,10 @@ class Emulator:
         *,
         headless: bool = False,
         gpu: str = "auto",
-        ram: int = 2048,
+        ram: int = 4096,
         wipe_data: bool = False,
+        cold_boot: bool = False,
+        no_snapshot_save: bool = False,
         extra_args: Optional[list[str]] = None,
     ) -> ADB:
         """Launch the emulator and return an :class:`ADB` handle.
@@ -140,6 +142,10 @@ class Emulator:
             RAM in MB.
         wipe_data:
             Wipe user data on start.
+        cold_boot:
+            Force cold boot, ignoring any saved snapshot.
+        no_snapshot_save:
+            Don't save snapshot on exit (useful during fuzzing).
         extra_args:
             Any additional emulator flags.
         """
@@ -154,11 +160,16 @@ class Emulator:
             "-avd", self.avd_name,
             "-gpu", gpu,
             "-memory", str(ram),
+            "-no-boot-anim",
         ]
         if headless:
             cmd.append("-no-window")
         if wipe_data:
             cmd.append("-wipe-data")
+        if cold_boot:
+            cmd.append("-no-snapshot-load")
+        if no_snapshot_save:
+            cmd.append("-no-snapshot-save")
         if extra_args:
             cmd.extend(extra_args)
 

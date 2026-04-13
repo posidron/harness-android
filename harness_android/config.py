@@ -50,6 +50,74 @@ EMULATOR_CONSOLE_PORT = 5554
 CDP_REMOTE_PORT = 9222  # Chrome DevTools Protocol on device
 CDP_LOCAL_PORT = 9222   # Forwarded to host
 
+# Default harness configuration — overridden by config.json, then by CLI flags
+_DEFAULT_CONFIG = {
+    "emulator": {
+        "ram": 4096,
+        "gpu": "auto",
+        "avd_name": DEFAULT_AVD_NAME,
+        "api_level": DEFAULT_API_LEVEL,
+        "device_profile": DEFAULT_DEVICE_PROFILE,
+        "headless": False,
+        "no_boot_anim": True,
+    },
+    "browser": {
+        "package": "com.android.chrome",
+        "activity": "com.google.android.apps.chrome.Main",
+        "cdp_port": CDP_LOCAL_PORT,
+    },
+    "proxy": {
+        "host": "10.0.2.2",
+        "port": 8080,
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge *override* into *base* recursively."""
+    result = base.copy()
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def load_config() -> dict:
+    """Load harness configuration.
+
+    Searches (in order):
+    1. ``./harness.json`` (project-local)
+    2. ``~/.android-harness/config.json`` (user-global)
+    3. Built-in defaults
+
+    Returns the merged config dict.
+    """
+    import json as _json
+    config = _DEFAULT_CONFIG.copy()
+
+    paths = [
+        get_harness_home() / "config.json",
+        Path("harness.json"),
+    ]
+    for p in paths:
+        if p.is_file():
+            try:
+                with open(p) as f:
+                    user = _json.load(f)
+                config = _deep_merge(config, user)
+            except Exception:  # noqa: BLE001
+                pass
+
+    return config
+
+
+def get_config_value(section: str, key: str, default=None):
+    """Get a single config value, e.g. ``get_config_value("emulator", "ram")``."""
+    cfg = load_config()
+    return cfg.get(section, {}).get(key, default)
+
 
 def get_harness_home() -> Path:
     """Return the root directory for android-harness data.
