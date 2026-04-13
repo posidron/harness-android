@@ -183,6 +183,9 @@ def cmd_browser_cdp(args: argparse.Namespace) -> None:
     """Set up CDP and optionally navigate / run JS."""
     adb = ADB(serial=_find_serial(args))
     browser = Browser(adb, local_port=args.port)
+    if args.chrome_flags:
+        for flag_group in args.chrome_flags:
+            browser._extra_chrome_flags.extend(flag_group.split())
     browser.enable_cdp()
     browser.connect()
 
@@ -854,6 +857,84 @@ def cmd_ui_monkey(args: argparse.Namespace) -> None:
 
 
 # ======================================================================
+# File server + Mojo enable handlers
+# ======================================================================
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    import time
+    from harness_android.fileserver import FileServer
+    server = FileServer(args.directory, port=args.port)
+    server.start()
+    console.print(f"[bold]Serving {args.directory} — press Ctrl+C to stop")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    server.stop()
+
+
+def cmd_mojo_enable(args: argparse.Namespace) -> None:
+    """Restart Chrome with MojoJS bindings enabled and optionally serve gen/."""
+    adb = ADB(serial=_find_serial(args))
+    browser = Browser(adb, local_port=args.port)
+
+    mojo_flags = [
+        "--enable-blink-features=MojoJS,MojoJSTest",
+    ]
+    if args.chrome_flags:
+        for flag_group in args.chrome_flags:
+            mojo_flags.extend(flag_group.split())
+
+    browser._extra_chrome_flags.extend(mojo_flags)
+    browser.enable_cdp()
+    browser.connect()
+    browser.enable_domains()
+
+    console.print("[green bold]MojoJS bindings enabled!")
+    console.print("[dim]Chrome restarted with: " + " ".join(mojo_flags))
+    console.print("[dim]JS can now use Mojo.bindInterface() in the page context.")
+
+    server = None
+    if args.gen_dir:
+        from harness_android.fileserver import FileServer
+        server = FileServer(args.gen_dir, port=args.serve_port)
+        server.start()
+        console.print(
+            f"[bold]gen/ served at {server.emulator_url}\n"
+            f"  Navigate to {server.emulator_url}/your_test.html"
+        )
+
+    if args.navigate:
+        browser.navigate(args.navigate)
+
+    if args.interactive:
+        console.print("[bold]Interactive CDP REPL — type JS (or 'quit'):")
+        while True:
+            try:
+                expr = input("mojo> ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if expr.strip().lower() in ("quit", "exit"):
+                break
+            try:
+                result = browser.evaluate_js(expr)
+                console.print(json.dumps(result, indent=2, default=str))
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[red]{exc}")
+    elif not args.navigate:
+        console.print(
+            "[yellow]Tip: use --navigate URL or --interactive, "
+            "or open a URL via 'browser cdp --navigate' in another terminal."
+        )
+
+    if server:
+        server.stop()
+    browser.close()
+
+
+# ======================================================================
 # Parser construction
 # ======================================================================
 
@@ -950,6 +1031,7 @@ def build_parser() -> argparse.ArgumentParser:
     # browser cdp
     p = bsub.add_parser("cdp", help="Chrome DevTools Protocol control")
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT, help="Local CDP port")
+    p.add_argument("--chrome-flags", action="append", help='Extra Chrome flags (e.g. "--enable-blink-features=MojoJS")')
     p.add_argument("--navigate", "-n", help="Navigate to URL")
     p.add_argument("--js", "-j", help="Evaluate JavaScript expression")
     p.add_argument("--title", action="store_true", help="Print page title")
@@ -1062,6 +1144,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT)
     p.add_argument("-o", "--output", help="Save results to JSON")
     p.set_defaults(func=cmd_mojo_fuzz)
+
+    p = msub.add_parser("enable", help="Restart Chrome with MojoJS bindings enabled")
+    p.add_argument("--port", type=int, default=CDP_LOCAL_PORT, help="Local CDP port")
+    p.add_argument("--gen-dir", help="Path to Chromium gen/ folder to serve via HTTP")
+    p.add_argument("--serve-port", type=int, default=8089, help="HTTP port for gen/ (default: 8089)")
+    p.add_argument("--chrome-flags", action="append", help="Additional Chrome flags")
+    p.add_argument("--navigate", "-n", help="Navigate to URL after enabling")
+    p.add_argument("--interactive", "-i", action="store_true", help="Enter Mojo JS REPL")
+    p.set_defaults(func=cmd_mojo_enable)
+
+    # ---- serve ----
+    p = sub.add_parser("serve", help="Serve a local directory over HTTP (accessible at 10.0.2.2)")
+    p.add_argument("directory", help="Path to directory to serve")
+    p.add_argument("--port", type=int, default=8089, help="HTTP port (default: 8089)")
+    p.set_defaults(func=cmd_serve)
 
     # ---- forensics ----
     forensics_sub = sub.add_parser("forensics", help="APK forensics and secret scanning")
