@@ -31,8 +31,8 @@ poetry run harness-android browser cdp --interactive
 # 7 — Run a full recon against a target
 poetry run harness-android recon --url "https://target.example.com" -o recon.json
 
-# 8 — Scan an APK for hardcoded secrets
-poetry run harness-android forensics scan app.apk -o report.json
+# 8 — Scan an installed app for hardcoded secrets (auto-pulls APK)
+poetry run harness-android forensics scan-app com.android.chrome
 
 # 9 — Run a pentest script
 poetry run harness-android pentest run my_test.py --report findings.json
@@ -90,6 +90,8 @@ harness-android start
 harness-android start --headless           # no window (CI)
 harness-android start --gpu host --ram 4096
 harness-android start --wipe               # fresh data
+harness-android start --cold-boot          # skip snapshot, full boot
+harness-android start --no-snapshot-save   # don't save snapshot on exit
 ```
 
 #### `stop`
@@ -97,6 +99,13 @@ Kill all running emulators.
 
 #### `status`
 Show SDK/AVD paths and connected devices.
+
+#### `install-chromium`
+Download and install a debuggable Chromium build. Required for CDP on API 35+ where release Chrome ignores debug flags.
+
+```bash
+harness-android install-chromium
+```
 
 ### Device control
 
@@ -384,6 +393,16 @@ harness-android forensics scan app.apk -o report.json
 
 Scans 27 secret patterns: AWS keys, Google API keys, GitHub/Slack/Stripe tokens, JWTs, PEM private keys, Azure connection strings, generic passwords, hardcoded URLs with credentials, and more.
 
+#### `forensics scan-app`
+**One command to scan any installed app** — auto-pulls the APK from the device by package name and runs a full scan:
+
+```bash
+harness-android forensics scan-app com.android.chrome
+harness-android forensics scan-app com.example.app --app-data -o report.json
+```
+
+Add `--app-data` to also scan the app's private data (shared prefs, SQLite DBs, internal files).
+
 #### `forensics secrets`
 Secret scanning only:
 
@@ -412,6 +431,85 @@ Pull and scan every 3rd-party APK installed on the device:
 
 ```bash
 harness-android forensics installed -o all_apps_report.json
+```
+
+### Intent fuzzing
+
+#### `intent enumerate`
+List all exported components (activities, services, receivers) from an installed app:
+
+```bash
+harness-android intent enumerate com.example.app
+```
+
+#### `intent fuzz`
+Fuzz exported components with type-appropriate payloads (strings, URIs, numbers, booleans). Monitors logcat for crashes after each payload.
+
+```bash
+harness-android intent fuzz com.example.app
+harness-android intent fuzz com.example.app --component .DeepLinkActivity
+```
+
+### Logcat
+
+#### `logcat stream`
+Stream logcat output in real time (clears the buffer first):
+
+```bash
+harness-android logcat stream
+harness-android logcat stream --tag "chromium"
+```
+
+#### `logcat capture`
+Capture logcat for a fixed duration, then scan for crashes (FATAL EXCEPTION, SIGSEGV, ANR, ASan/AddressSanitizer, tombstones):
+
+```bash
+harness-android logcat capture --duration 30 -o logcat.txt
+```
+
+### WebView enumeration
+
+Android apps that embed a `WebView` with debugging enabled expose a Unix socket (`webview_devtools_remote_<PID>`) that speaks the Chrome DevTools Protocol. If a WebView appears in `webview list`, it **already has CDP enabled** — the socket *is* the CDP endpoint.
+
+| Scenario | Visible? | CDP works? |
+|---|---|---|
+| App calls `WebView.setWebContentsDebuggingEnabled(true)` | Yes | Yes — connect and use immediately |
+| APK has `android:debuggable="true"` in manifest | Yes | Yes — same as above |
+| App does not enable WebView debugging | No | No — no socket exists, invisible to harness |
+| `chrome_devtools_remote` (Chrome's own socket) | Yes | Needs `enable_cdp()` first — harness handles this automatically |
+
+> **Note:** `chrome_devtools_remote` is special. Chrome always exposes this socket, but without the debug command-line flags (written by `enable_cdp()`), it has no active inspectable page. When you `webview connect chrome_devtools_remote`, the harness automatically restarts Chrome with debug flags so CDP works. For all other WebView sockets, the connection is direct — no restart needed.
+
+#### `webview list`
+Enumerate all debuggable WebView sockets on the device:
+
+```bash
+harness-android webview list
+```
+
+Example output:
+```
+Found 2 debuggable WebView socket(s)
+┃ Socket                       ┃ PID  ┃ Package                                        ┃ Pages    ┃
+│ webview_devtools_remote_1702 │ 1702 │ com.google.android.googlequicksearchbox:search │ no pages │
+│ chrome_devtools_remote       │ 0    │ com.android.chrome                             │ no pages │
+```
+
+#### `webview connect`
+Connect to a WebView and control it via CDP — navigate, run JS, take screenshots, or drop into an interactive REPL:
+
+```bash
+# Connect and navigate
+harness-android webview connect chrome_devtools_remote --navigate "https://cnn.com"
+
+# Run JavaScript inside a third-party WebView
+harness-android webview connect webview_devtools_remote_1702 --js "document.title"
+
+# Interactive JS REPL
+harness-android webview connect chrome_devtools_remote --interactive
+
+# Take a screenshot of what the WebView is rendering
+harness-android webview connect webview_devtools_remote_1702 --page-screenshot shot.png
 ```
 
 ---
@@ -535,16 +633,18 @@ harness-android/
 ├── pyproject.toml              # Poetry config, dependencies, entry point
 ├── README.md                   # This file
 ├── ARCHITECTURE.md             # Detailed design & data-flow docs
+├── config.toml.example         # Example config file (copy as harness.json)
 ├── .gitignore
 ├── examples/
-│   ├── recon_pentest.py         # Recon plugin (fingerprint, spider, headers, CSP)\n│   └── mojo_pentest.py          # Mojo IPC plugin (trace, trigger, fuzz)
+│   ├── recon_pentest.py         # Recon plugin (fingerprint, spider, headers, CSP)
+│   └── mojo_pentest.py          # Mojo IPC plugin (trace, trigger, fuzz)
 └── harness_android/
     ├── __init__.py
-    ├── config.py               # Paths, platform detection, constants
+    ├── config.py               # Paths, platform detection, config loading
     ├── sdk.py                  # JDK + SDK bootstrap & package management
     ├── adb.py                  # ADB wrapper (shell, install, input, files)
-    ├── emulator.py             # AVD creation & emulator lifecycle
-    ├── browser.py              # Chrome CDP control + security helpers
+    ├── emulator.py             # AVD creation & emulator lifecycle + snapshots
+    ├── browser.py              # Chrome/Chromium CDP control + security helpers
     ├── device.py               # High-level facade (Device context manager)
     ├── proxy.py                # HTTP proxy, CA certs, tcpdump, DNS
     ├── hooks.py                # JS API hooks (fetch, XHR, cookies, forms …)
@@ -552,8 +652,44 @@ harness-android/
     ├── recon.py                # Fingerprint, spider, storage, CSP analysis
     ├── pentest.py              # PentestContext + script runner
     ├── mojo.py                 # Mojo IPC tracing, Web API triggers, fuzzing
-    ├── forensics.py            # APK secret scanning, manifest audit, app data extraction
+    ├── forensics.py            # APK secret scanning, manifest audit, app data
+    ├── logcat.py               # Logcat capture + crash detection (ASan, SIGSEGV)
+    ├── intents.py              # Intent fuzzing (exported components, deep links)
+    ├── webview.py              # WebView enumeration + CDP connection
     └── cli.py                  # argparse CLI (all commands)
+```
+
+---
+
+## Configuration
+
+Settings are loaded from (in priority order):
+
+1. **CLI flags** — always win
+2. **`./harness.json`** — project-local config
+3. **`~/.android-harness/config.json`** — user-global config
+4. **Built-in defaults**
+
+Example `harness.json`:
+
+```json
+{
+  "emulator": {
+    "ram": 4096,
+    "gpu": "host",
+    "api_level": 35,
+    "headless": false
+  },
+  "browser": {
+    "package": "com.android.chrome",
+    "activity": "com.google.android.apps.chrome.Main",
+    "cdp_port": 9222
+  },
+  "proxy": {
+    "host": "10.0.2.2",
+    "port": 8080
+  }
+}
 ```
 
 ---
@@ -564,10 +700,13 @@ harness-android/
 |---|---|
 | `sdkmanager` not found | Run `harness-android setup` |
 | Emulator won't start | Ensure hardware acceleration is available (WHPX / HAXM / Hypervisor.framework) |
+| Emulator frozen / ADB offline | Kill emulator, restart with `harness-android start --cold-boot --ram 4096` |
 | `No inspectable page found` | Chrome may still be starting — `enable_cdp()` retries for 20s automatically |
 | CDP WebSocket 403 | Fixed automatically — harness writes `--remote-allow-origins=*` flag |
+| CDP not working on API 35 | Release Chrome ignores debug flags; run `harness-android install-chromium` |
 | Proxy not intercepting HTTPS | Run `proxy install-ca --mitmproxy` or `--cert` to install the CA cert |
 | `tcpdump` not found | Some images lack it; use `proxy enable` with mitmproxy instead |
+| Slow emulator startup | Use snapshots (default) — first boot is slow, subsequent boots load from snapshot |
 | Slow on CI | Use `--headless --gpu swiftshader_indirect --ram 2048` |
 | Java not found | Usually auto-installed by `setup`. Set `JAVA_HOME` if you prefer your own JDK |
 
