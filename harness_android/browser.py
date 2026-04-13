@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import requests
 import websocket  # websocket-client
+from websocket import WebSocketTimeoutException
 from rich.console import Console
 
 from harness_android.adb import ADB
@@ -20,7 +21,7 @@ CHROME_ACTIVITY = "com.google.android.apps.chrome.Main"
 
 
 class Browser:
-    """Remote-control Chrome running inside the Android emulator.
+    """Remote-control Chrome/Chromium running inside the Android emulator.
 
     The communication has two layers:
 
@@ -28,11 +29,22 @@ class Browser:
     2. **Chrome DevTools Protocol** – evaluate JS, inspect DOM, capture
        network, take page screenshots, etc.  Requires Chrome to be started
        with ``--enable-remote-debugging`` and a port forward through ADB.
+
+    Pass ``package`` and ``activity`` to target a different browser
+    (e.g. Chromium, Chrome Dev, Edge).
     """
 
-    def __init__(self, adb: ADB, local_port: int = CDP_LOCAL_PORT):
+    def __init__(
+        self,
+        adb: ADB,
+        local_port: int = CDP_LOCAL_PORT,
+        package: str = CHROME_PACKAGE,
+        activity: str = CHROME_ACTIVITY,
+    ):
         self.adb = adb
         self.local_port = local_port
+        self.package = package
+        self.activity = activity
         self._ws: Optional[websocket.WebSocket] = None
         self._msg_id = 0
         self._extra_chrome_flags: list[str] = []
@@ -47,15 +59,15 @@ class Browser:
         console.print(f"[green]Opened {url}")
 
     def open_chrome(self) -> None:
-        """Launch Chrome's main activity."""
-        self.adb.launch_activity(f"{CHROME_PACKAGE}/{CHROME_ACTIVITY}")
+        """Launch the browser's main activity."""
+        self.adb.launch_activity(f"{self.package}/{self.activity}")
 
     def clear_data(self) -> None:
-        """Clear Chrome app data (cookies, cache, etc.)."""
-        self.adb.shell("pm", "clear", CHROME_PACKAGE)
+        """Clear browser app data (cookies, cache, etc.)."""
+        self.adb.shell("pm", "clear", self.package)
 
     def force_stop(self) -> None:
-        self.adb.shell("am", "force-stop", CHROME_PACKAGE)
+        self.adb.shell("am", "force-stop", self.package)
 
     # ------------------------------------------------------------------
     # CDP setup
@@ -75,7 +87,7 @@ class Browser:
         # the local-subprocess → adb-shell boundary.
         for dest in (
             "/data/local/tmp/chrome-command-line",
-            "/data/local/tmp/com.android.chrome-command-line",
+            f"/data/local/tmp/{self.package}-command-line",
         ):
             self.adb.run(
                 "shell",
@@ -97,7 +109,7 @@ class Browser:
         time.sleep(1)
         self.adb.shell(
             "am", "start",
-            "-n", f"{CHROME_PACKAGE}/{CHROME_ACTIVITY}",
+            "-n", f"{self.package}/{self.activity}",
             "--es", "com.android.chrome.extra.OPEN_URL", "about:blank",
         )
 
@@ -171,8 +183,19 @@ class Browser:
     def connect(self) -> None:
         """Open a WebSocket connection to the first browser tab."""
         ws_url = self._get_ws_url()
-        self._ws = websocket.create_connection(ws_url, timeout=30)
+        self._ws = websocket.create_connection(ws_url, timeout=60)
         console.print("[green]CDP WebSocket connected.")
+
+    def enable_domains(self) -> None:
+        """Enable common CDP domains so commands like Runtime.evaluate work."""
+        try:
+            self.send("Page.enable")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.send("Runtime.enable")
+        except Exception:  # noqa: BLE001
+            pass
 
     def close(self) -> None:
         if self._ws:
@@ -187,14 +210,24 @@ class Browser:
         self._msg_id += 1
         msg = {"id": self._msg_id, "method": method, "params": params or {}}
         self._ws.send(json.dumps(msg))
-        # Read until we get our reply (skip events)
-        while True:
-            raw = self._ws.recv()
+        # Read until we get our reply (skip events).
+        # Heavy pages (e.g. CNN) generate many CDP events during navigation;
+        # use a per-message deadline so we don't die on a single slow recv.
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                raw = self._ws.recv()
+            except WebSocketTimeoutException:
+                continue  # keep waiting until overall deadline
             data = json.loads(raw)
             if data.get("id") == self._msg_id:
                 if "error" in data:
                     raise RuntimeError(f"CDP error: {data['error']}")
                 return data.get("result", {})
+        raise RuntimeError(
+            f"CDP response for {method} (id={self._msg_id}) not received "
+            "within 120 s"
+        )
 
     # ------------------------------------------------------------------
     # High-level CDP helpers
