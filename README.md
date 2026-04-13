@@ -467,6 +467,60 @@ Capture logcat for a fixed duration, then scan for crashes (FATAL EXCEPTION, SIG
 harness-android logcat capture --duration 30 -o logcat.txt
 ```
 
+### UI automation
+
+Three approaches for controlling the UI, each with different trade-offs:
+
+| Method | Works on | How |
+|---|---|---|
+| **UIAutomator** (`ui dump/tap/type`) | Any app, any screen | Parses the view hierarchy XML — finds elements by text, resource-id, class |
+| **CDP Input** (Python API) | Browser / WebView only | `Input.dispatchTouchEvent` / `Input.dispatchKeyEvent` via CDP — realistic browser-level events |
+| **Monkey** (`ui monkey`) | Any app | Random events (taps, swipes, rotations) for stress testing / crash discovery |
+
+#### `ui dump`
+Dump the full screen UI hierarchy (works for any app, not just browsers):
+
+```bash
+harness-android ui dump                    # tree view
+harness-android ui dump --clickable        # table of clickable elements with coordinates
+harness-android ui dump --depth 5          # limit tree depth
+```
+
+#### `ui tap`
+Automatically find an element and tap its centre — no need to know coordinates:
+
+```bash
+harness-android ui tap --text "Sign in"
+harness-android ui tap --resource-id "com.example:id/login_button"
+```
+
+#### `ui type`
+Tap a text field by resource-id and type text into it:
+
+```bash
+harness-android ui type "com.example:id/username" "admin@example.com"
+```
+
+#### `ui monkey`
+Run the Android monkey random event generator for stress testing:
+
+```bash
+harness-android ui monkey -p com.android.chrome -n 10000
+harness-android ui monkey -p com.example.app --seed 42 -o monkey.log
+harness-android ui monkey --ignore-crashes --ignore-timeouts -n 50000
+```
+
+#### CDP Input (Python API)
+
+For browser-level touch and keyboard events (more realistic than JS `.click()`):
+
+```python
+browser.dispatch_touch(200, 400)                    # tap at (200, 400)
+browser.dispatch_swipe(200, 800, 200, 200)           # swipe up
+browser.dispatch_key("Enter")                        # press Enter
+browser.dispatch_key("a", modifiers=2)               # Ctrl+A
+```
+
 ### WebView enumeration
 
 Android apps that embed a `WebView` with debugging enabled expose a Unix socket (`webview_devtools_remote_<PID>`) that speaks the Chrome DevTools Protocol. If a WebView appears in `webview list`, it **already has CDP enabled** — the socket *is* the CDP endpoint.
@@ -644,7 +698,7 @@ harness-android/
     ├── sdk.py                  # JDK + SDK bootstrap & package management
     ├── adb.py                  # ADB wrapper (shell, install, input, files)
     ├── emulator.py             # AVD creation & emulator lifecycle + snapshots
-    ├── browser.py              # Chrome/Chromium CDP control + security helpers
+    ├── browser.py              # Chrome/Chromium CDP control + Input domain
     ├── device.py               # High-level facade (Device context manager)
     ├── proxy.py                # HTTP proxy, CA certs, tcpdump, DNS
     ├── hooks.py                # JS API hooks (fetch, XHR, cookies, forms …)
@@ -656,6 +710,7 @@ harness-android/
     ├── logcat.py               # Logcat capture + crash detection (ASan, SIGSEGV)
     ├── intents.py              # Intent fuzzing (exported components, deep links)
     ├── webview.py              # WebView enumeration + CDP connection
+    ├── ui.py                   # UIAutomator dump, smart tap, monkey testing
     └── cli.py                  # argparse CLI (all commands)
 ```
 

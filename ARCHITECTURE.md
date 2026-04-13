@@ -43,14 +43,14 @@ harness-android is a cross-platform (Windows/macOS) Android emulator harness bui
 
 | Module | Responsibility |
 |---|---|
-| **config.py** | Platform detection (Windows/macOS/Linux), default constants (API level, AVD name, ports), path resolution for SDK/JDK/AVD roots, download URLs for cmdline-tools and Adoptium JDK 17. Config file loading: merges `./harness.json` → `~/.android-harness/config.json` → built-in defaults, with CLI flags always winning. |
+| **config.py** | Platform detection (Windows/macOS/Linux), default constants (API level, AVD name, ports), path resolution for SDK/JDK/AVD roots, download URLs for cmdline-tools and Adoptium JDK 17 |
 | **sdk.py** | JDK bootstrap (downloads portable OpenJDK 17 if no `JAVA_HOME`), SDK cmdline-tools download and extraction, `sdkmanager` wrapper for package installation, licence acceptance. Builds env dicts with `JAVA_HOME` injected. |
 
 ### Emulator & device layer
 
 | Module | Responsibility |
 |---|---|
-| **emulator.py** | AVD creation/deletion via `avdmanager`, emulator process launch (headless, GPU, RAM 4096 default), `--cold-boot` / `--no-snapshot-save` snapshot control, `-no-boot-anim`, serial detection, graceful shutdown. Always injects `JAVA_HOME` into subprocess env. |
+| **emulator.py** | AVD creation/deletion via `avdmanager`, emulator process launch (headless, GPU, RAM config), serial detection, graceful shutdown. Always injects `JAVA_HOME` into subprocess env. |
 | **adb.py** | Thin wrapper around the `adb` CLI. Shell commands, app install/uninstall, file push/pull, screenshots, screen recording, port forwarding, input events (tap, swipe, text, keycodes), device property queries. |
 | **device.py** | High-level facade combining `Emulator`, `ADB`, and `Browser`. Provides a context manager (`with Device() as dev`) for one-liner scripting. Delegates to the lower layers. |
 
@@ -58,7 +58,7 @@ harness-android is a cross-platform (Windows/macOS) Android emulator harness bui
 
 | Module | Responsibility |
 |---|---|
-| **browser.py** | Chrome lifecycle (start, stop, clear data) via ADB intents. CDP setup: writes `chrome-command-line` flags (`--enable-remote-debugging`, `--remote-allow-origins=*`), restarts Chrome, sets up ADB abstract socket forwarding, polls `/json` endpoint. WebSocket messaging: send CDP commands, receive responses (skips events). High-level CDP helpers: navigate, evaluate JS, DOM interaction, screenshots, cookies, user-agent override, Security domain, certificate error bypass, device emulation, cache control. |
+| **browser.py** | Chrome lifecycle (start, stop, clear data) via ADB intents. CDP setup: writes `chrome-command-line` flags (`--enable-remote-debugging`, `--remote-allow-origins=*`), restarts Chrome, sets up ADB abstract socket forwarding, polls `/json` endpoint. WebSocket messaging: send CDP commands, receive responses (120s deadline, handles timeout recovery). High-level CDP helpers: navigate, evaluate JS, DOM interaction, screenshots, cookies, user-agent override, Security domain, certificate error bypass, device emulation, cache control. **CDP Input domain**: `dispatch_touch()`, `dispatch_swipe()`, `dispatch_key()` for realistic browser-level touch/keyboard events. |
 
 ### Pentest layer
 
@@ -73,13 +73,14 @@ harness-android is a cross-platform (Windows/macOS) Android emulator harness bui
 | **forensics.py** | APK secret scanning (27 regex patterns: AWS, Google, GitHub, Slack, Stripe, JWT, PEM, Azure, etc.), AndroidManifest.xml security audit (debuggable, allowBackup, exported components, permissions), on-device app data extraction with SQLite scanning. `scan-app` command auto-pulls APK by package name. |
 | **logcat.py** | Background logcat capture with `logcat -c` buffer clear. Crash detection for FATAL EXCEPTION, SIGSEGV, ANR, ASan/AddressSanitizer, tombstones. `print_crashes()` / `dump_crashes()` for analysis. |
 | **intents.py** | Intent fuzzing for exported components. Parses AndroidManifest.xml for exported activities/services/receivers, generates type-appropriate payloads (strings, URIs, numbers, booleans), monitors logcat for crashes after each fuzz attempt. |
-| **webview.py** | Enumerates debuggable WebView sockets via `/proc/net/unix`. `connect_to_webview()` establishes a CDP connection to any listed WebView for inspection/control. |
+| **webview.py** | Enumerates debuggable WebView sockets via `/proc/net/unix`. `connect_webview()` establishes a CDP connection to any listed WebView. Auto-detects `chrome_devtools_remote` for full `enable_cdp()` flow. |
+| **ui.py** | **UIAutomator**: dumps screen hierarchy via `uiautomator dump`, parses XML into element tree with bounds/text/resource-id/class. Find helpers: `find_by_text()`, `find_by_resource_id()`, `find_by_content_desc()`, `find_clickable()`. **Smart tap**: `tap_element()` locates element by text and taps its computed centre. **Monkey**: `run_monkey()` wraps the `monkey` random event generator with crash/ANR parsing. |
 
 ### CLI layer
 
 | Module | Responsibility |
 |---|---|
-| **cli.py** | argparse-based CLI. 25+ commands across 12 groups: emulator management (setup, install-chromium, create, delete, start, stop, status), device control (shell, install, screenshot, push, pull, input), browser (open, cdp), proxy (enable, disable, status, install-ca, tcpdump, hosts), recon, hooks, pentest (run), mojo (trace, trigger, fuzz), forensics (scan, secrets, manifest, scan-app, app-data, installed), intent (enumerate, fuzz), logcat (stream, capture), webview (list, connect). Config-aware: merges `harness.json` values into defaults. |
+| **cli.py** | argparse-based CLI. 30+ commands across 13 groups: emulator management (setup, install-chromium, create, delete, start, stop, status), device control (shell, install, screenshot, push, pull, input), browser (open, cdp), proxy (enable, disable, status, install-ca, tcpdump, hosts), recon, hooks, pentest (run), mojo (trace, trigger, fuzz), forensics (scan, secrets, manifest, scan-app, app-data, installed), intent (enumerate, fuzz), logcat (stream, capture), webview (list, connect), ui (dump, tap, type, monkey). |
 
 ---
 
@@ -334,8 +335,7 @@ start command
 ├── 1. Check AVD exists → create if not (avdmanager create avd)
 │
 ├── 2. Launch emulator process (subprocess.Popen, background)
-│      Flags: -avd <name> -gpu auto -memory 4096 -no-boot-anim
-│             [-no-window] [-wipe-data] [-no-snapshot-load] [-no-snapshot-save]
+│      Flags: -avd <name> -gpu auto -memory 2048 [-no-window] [-wipe-data]
 │
 ├── 3. Detect serial: poll `adb devices` for emulator-XXXX
 │
