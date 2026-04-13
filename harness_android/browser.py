@@ -376,3 +376,88 @@ class Browser:
 
     def enable_cache(self) -> None:
         self.send("Network.setCacheDisabled", {"cacheDisabled": False})
+
+    # ------------------------------------------------------------------
+    # CDP Input domain — synthesize real touch / keyboard events
+    # ------------------------------------------------------------------
+
+    def dispatch_touch(
+        self, x: float, y: float, touch_type: str = "tap"
+    ) -> None:
+        """Synthesize a touch event at (x, y) in CSS pixels.
+
+        *touch_type*: ``tap`` (press+release), ``press``, ``release``,
+        ``move``.
+        """
+        if touch_type == "tap":
+            tp = [{"x": x, "y": y}]
+            self.send("Input.dispatchTouchEvent", {
+                "type": "touchStart",
+                "touchPoints": tp,
+            })
+            self.send("Input.dispatchTouchEvent", {
+                "type": "touchEnd",
+                "touchPoints": [],
+            })
+        else:
+            mapping = {"press": "touchStart", "release": "touchEnd", "move": "touchMove"}
+            tp = [{"x": x, "y": y}] if touch_type != "release" else []
+            self.send("Input.dispatchTouchEvent", {
+                "type": mapping.get(touch_type, touch_type),
+                "touchPoints": tp,
+            })
+
+    def dispatch_swipe(
+        self,
+        x1: float, y1: float,
+        x2: float, y2: float,
+        steps: int = 10,
+        duration_ms: int = 300,
+    ) -> None:
+        """Synthesize a swipe gesture from (x1,y1) to (x2,y2)."""
+        import time
+        step_delay = (duration_ms / 1000) / steps
+        self.send("Input.dispatchTouchEvent", {
+            "type": "touchStart",
+            "touchPoints": [{"x": x1, "y": y1}],
+        })
+        for i in range(1, steps + 1):
+            frac = i / steps
+            cx = x1 + (x2 - x1) * frac
+            cy = y1 + (y2 - y1) * frac
+            self.send("Input.dispatchTouchEvent", {
+                "type": "touchMove",
+                "touchPoints": [{"x": cx, "y": cy}],
+            })
+            time.sleep(step_delay)
+        self.send("Input.dispatchTouchEvent", {
+            "type": "touchEnd",
+            "touchPoints": [],
+        })
+
+    def dispatch_key(
+        self,
+        key: str,
+        key_type: str = "press",
+        modifiers: int = 0,
+    ) -> None:
+        """Synthesize a keyboard event.
+
+        *key*: Key value (e.g. ``Enter``, ``a``, ``Tab``).
+        *key_type*: ``press`` (down+up), ``down``, ``up``.
+        *modifiers*: Bitmask — 1=Alt, 2=Ctrl, 4=Meta, 8=Shift.
+        """
+        text = key if len(key) == 1 else ""
+        if key_type in ("press", "down"):
+            self.send("Input.dispatchKeyEvent", {
+                "type": "keyDown",
+                "key": key,
+                "text": text,
+                "modifiers": modifiers,
+            })
+        if key_type in ("press", "up"):
+            self.send("Input.dispatchKeyEvent", {
+                "type": "keyUp",
+                "key": key,
+                "modifiers": modifiers,
+            })
