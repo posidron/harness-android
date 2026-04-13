@@ -174,6 +174,28 @@ harness-android browser cdp --page-screenshot page.png
 harness-android browser cdp --interactive
 ```
 
+The `--interactive` flag opens a JavaScript REPL that evaluates expressions directly in the Chrome page context via CDP `Runtime.evaluate`. Everything you type runs as JS in the browser:
+
+```
+cdp> document.title
+"Example Domain"
+cdp> window.location.href
+"https://example.com/"
+cdp> document.querySelectorAll('a').length
+1
+cdp> navigator.userAgent
+"Mozilla/5.0 (Linux; Android 15; ...) Chrome/124.0.6367.82 ..."
+cdp> document.cookie
+""
+cdp> typeof Mojo
+"undefined"
+cdp> window.location.href = 'https://httpbin.org/get'
+"https://httpbin.org/get"
+cdp> quit
+```
+
+Type `quit`, `exit`, or press Ctrl+C to leave the REPL.
+
 ### Proxy & traffic interception
 
 #### `proxy enable` / `proxy disable`
