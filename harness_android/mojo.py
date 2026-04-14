@@ -416,26 +416,39 @@ class MojoTracer:
         result = TriggerResult(api_name=name, mojo_interface=mojo_interface)
         start = time.monotonic()
         try:
-            # Use awaitPromise so async APIs resolve before we read the value
+            # Wrap in a 5-second timeout so permission-blocked APIs don't hang
+            timeout_js = (
+                f"Promise.race(["
+                f"  (async () => {{ return {js}; }})(),"
+                f"  new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))"
+                f"])"
+            )
             val = self.browser.send(
                 "Runtime.evaluate",
                 {
-                    "expression": f"(async () => {{ return {js}; }})()",
+                    "expression": timeout_js,
                     "returnByValue": True,
                     "awaitPromise": True,
                 },
             )
-            remote_obj = val.get("result", {})
-            result.result = remote_obj.get("value")
+            exc_details = val.get("exceptionDetails")
+            if exc_details:
+                result.result = exc_details.get("text", "error")
+            else:
+                remote_obj = val.get("result", {})
+                result.result = remote_obj.get("value")
         except Exception as exc:  # noqa: BLE001
             result.error = str(exc)
         result.duration_ms = (time.monotonic() - start) * 1000
         return result
 
     def trigger_all_apis(self) -> list[TriggerResult]:
-        """Trigger all known Mojo-backed Web APIs and return results."""        # Auto-grant permissions to avoid blocking prompts during recon
+        """Trigger all known Mojo-backed Web APIs and return results."""
+        # Auto-grant permissions for the current origin to suppress prompts
         try:
+            origin = self.browser.evaluate_js("window.location.origin") or ""
             self.browser.send("Browser.grantPermissions", {
+                "origin": origin,
                 "permissions": [
                     "geolocation", "notifications", "clipboardReadWrite",
                     "clipboardSanitizedWrite", "midi", "cameraPanTiltZoom",
@@ -445,6 +458,7 @@ class MojoTracer:
             })
         except Exception:  # noqa: BLE001
             pass  # older Chrome may not support all permissions
+
         console.print(f"[bold]Triggering {len(MOJO_WEB_API_TRIGGERS)} Mojo-backed Web APIs …")
         results: list[TriggerResult] = []
         for name, js, iface in MOJO_WEB_API_TRIGGERS:
