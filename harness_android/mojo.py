@@ -416,16 +416,35 @@ class MojoTracer:
         result = TriggerResult(api_name=name, mojo_interface=mojo_interface)
         start = time.monotonic()
         try:
-            # Wrap in async-aware evaluation
-            val = self.browser.evaluate_js(f"(async () => {{ return {js}; }})()")
-            result.result = val
+            # Use awaitPromise so async APIs resolve before we read the value
+            val = self.browser.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"(async () => {{ return {js}; }})()",
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                },
+            )
+            remote_obj = val.get("result", {})
+            result.result = remote_obj.get("value")
         except Exception as exc:  # noqa: BLE001
             result.error = str(exc)
         result.duration_ms = (time.monotonic() - start) * 1000
         return result
 
     def trigger_all_apis(self) -> list[TriggerResult]:
-        """Trigger all known Mojo-backed Web APIs and return results."""
+        """Trigger all known Mojo-backed Web APIs and return results."""        # Auto-grant permissions to avoid blocking prompts during recon
+        try:
+            self.browser.send("Browser.grantPermissions", {
+                "permissions": [
+                    "geolocation", "notifications", "clipboardReadWrite",
+                    "clipboardSanitizedWrite", "midi", "cameraPanTiltZoom",
+                    "audioCapture", "videoCapture", "sensors",
+                    "backgroundSync", "durableStorage",
+                ],
+            })
+        except Exception:  # noqa: BLE001
+            pass  # older Chrome may not support all permissions
         console.print(f"[bold]Triggering {len(MOJO_WEB_API_TRIGGERS)} Mojo-backed Web APIs …")
         results: list[TriggerResult] = []
         for name, js, iface in MOJO_WEB_API_TRIGGERS:
