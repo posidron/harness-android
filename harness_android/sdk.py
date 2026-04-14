@@ -200,17 +200,23 @@ def full_setup(api_level: int) -> Path:
     return sdk_root
 
 
-def download_chromium_apk() -> Path:
+def download_chromium_apk(arch: str = "x64") -> Path:
     """Download the latest Chromium snapshot APK (debuggable, supports CDP).
 
     Chromium snapshot builds have ``android:debuggable=true`` so they read
     command-line flags from ``/data/local/tmp/chromium-command-line``.
     This is required for CDP on API 35+ where release Chrome ignores flags.
+
+    *arch*: ``x64`` (default, for x86_64 emulators) or ``arm64``.
     """
-    # Chromium's continuous build — latest x86_64 APK
-    # The LAST_CHANGE file gives the latest build number
-    console.print("[bold]Downloading latest Chromium snapshot APK …")
-    last_change_url = "https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Android%2FLAST_CHANGE?alt=media"
+    # Map arch to the Chromium snapshot bucket prefix
+    prefix = {"x64": "Android_x64", "arm64": "Android_Arm64", "arm": "Android"}.get(arch, "Android_x64")
+
+    console.print(f"[bold]Downloading latest Chromium snapshot APK ({prefix}) …")
+    last_change_url = (
+        f"https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots"
+        f"/o/{prefix}%2FLAST_CHANGE?alt=media"
+    )
     try:
         resp = requests.get(last_change_url, timeout=30)
         resp.raise_for_status()
@@ -220,7 +226,7 @@ def download_chromium_apk() -> Path:
 
     apk_url = (
         f"https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots"
-        f"/o/Android%2F{build}%2Fchrome-android.zip?alt=media"
+        f"/o/{prefix}%2F{build}%2Fchrome-android.zip?alt=media"
     )
     console.print(f"[dim]Build: {build}")
     data = _download_with_progress(apk_url)
