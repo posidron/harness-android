@@ -209,25 +209,52 @@ def download_chromium_apk(arch: str = "x64") -> Path:
 
     *arch*: ``x64`` (default, for x86_64 emulators) or ``arm64``.
     """
-    # Map arch to the Chromium snapshot bucket prefix
-    prefix = {"x64": "Android_x64", "arm64": "Android_Arm64", "arm": "Android"}.get(arch, "Android_x64")
+    # Map arch to candidate Chromium snapshot bucket prefixes and their
+    # corresponding zip filenames.  ``Android_x64`` was removed from the
+    # bucket; ``AndroidDesktop_x64`` carries the same x86_64 APK under
+    # a ``chrome-android-desktop.zip`` archive.
+    _Candidate = tuple[str, str]  # (prefix, zip_name)
+    candidates: dict[str, list[_Candidate]] = {
+        "x64": [
+            ("Android_x64", "chrome-android.zip"),
+            ("AndroidDesktop_x64", "chrome-android-desktop.zip"),
+        ],
+        "arm64": [
+            ("Android_Arm64", "chrome-android.zip"),
+            ("AndroidDesktop_arm64", "chrome-android-desktop.zip"),
+        ],
+        "arm": [
+            ("Android", "chrome-android.zip"),
+        ],
+    }
+    entries = candidates.get(arch, [("Android", "chrome-android.zip")])
 
-    console.print(f"[bold]Downloading latest Chromium snapshot APK ({prefix}) …")
-    last_change_url = (
-        f"https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots"
-        f"/o/{prefix}%2FLAST_CHANGE?alt=media"
-    )
-    try:
-        resp = requests.get(last_change_url, timeout=30)
-        resp.raise_for_status()
-        build = resp.text.strip()
-    except Exception as exc:
-        raise RuntimeError(f"Could not fetch Chromium build number: {exc}") from exc
+    _base = "https://storage.googleapis.com/chromium-browser-snapshots"
 
-    apk_url = (
-        f"https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots"
-        f"/o/{prefix}%2F{build}%2Fchrome-android.zip?alt=media"
-    )
+    prefix: str | None = None
+    build: str | None = None
+    zip_name: str | None = None
+    for p, zn in entries:
+        url = f"{_base}/{p}/LAST_CHANGE"
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            prefix = p
+            build = resp.text.strip()
+            zip_name = zn
+            break
+        except Exception:
+            continue
+
+    if prefix is None or build is None or zip_name is None:
+        tried = ", ".join(p for p, _ in entries)
+        raise RuntimeError(
+            f"Could not fetch Chromium build number (tried prefixes: {tried})"
+        )
+
+    console.print(f"[bold]Downloading latest Chromium snapshot APK ({prefix}, build {build}) …")
+
+    apk_url = f"{_base}/{prefix}/{build}/{zip_name}"
     console.print(f"[dim]Build: {build}")
     data = _download_with_progress(apk_url)
 
@@ -238,7 +265,8 @@ def download_chromium_apk(arch: str = "x64") -> Path:
     apk_path = chromium_dir / "ChromePublic.apk"
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        # The zip contains chrome-android/apks/ChromePublic.apk
+        # APK lives at e.g. chrome-android/apks/ChromePublic.apk or
+        # chrome-android-desktop/apks/ChromePublic.apk
         for info in zf.infolist():
             if info.filename.endswith("ChromePublic.apk"):
                 apk_path.write_bytes(zf.read(info))

@@ -5,7 +5,11 @@ tracing IPC messages.  This is useful for **mapping the attack surface** —
 discovering which mojom interfaces are reachable from the renderer — but
 does NOT directly fuzz the IPC channel.
 
-For actual Mojo IPC fuzzing with MojoJS bindings, see mojo_bindings_test.html.
+For raw Mojo IPC fuzzing driven from the harness (MojoJS bindings), use::
+
+    harness-android mojo enable --fuzz blink.mojom.ClipboardHost
+
+or see ``mojo_bindings_test.html`` for an in-page variant.
 
 Run with: harness-android pentest run examples/mojo_recon.py
 """
@@ -15,7 +19,6 @@ def run(ctx):
     from harness_android.mojo import MojoTracer
 
     ctx.navigate("https://example.com")
-    ctx.wait(2)
 
     tracer = MojoTracer(ctx.browser, verbose=True)
 
@@ -31,7 +34,14 @@ def run(ctx):
 
     # Record findings for APIs that succeeded (attack surface)
     for r in results:
-        if not r.error and r.result not in ("unavailable", None):
+        if r.crashed:
+            ctx.add_finding(
+                title=f"Renderer crash via {r.api_name}",
+                severity="critical",
+                description=f"Triggering {r.api_name} crashed the renderer (Mojo interface {r.mojo_interface})",
+                evidence=r.error,
+            )
+        elif not r.error and r.result not in ("unavailable", None):
             ctx.add_finding(
                 title=f"Mojo interface reachable: {r.mojo_interface}",
                 severity="info",
@@ -54,9 +64,16 @@ def run(ctx):
 
     # Check for unexpected results
     for r in fuzz_results:
-        if r.error:
+        if r.crashed:
             ctx.add_finding(
-                title=f"Fuzz crash/error: {r.api_name}",
+                title=f"Fuzz crash: {r.api_name}",
+                severity="critical",
+                description=f"Renderer crashed on fuzzed input",
+                evidence=r.error,
+            )
+        elif r.error:
+            ctx.add_finding(
+                title=f"Fuzz error: {r.api_name}",
                 severity="high",
                 description=f"Input caused an error: {r.error}",
             )

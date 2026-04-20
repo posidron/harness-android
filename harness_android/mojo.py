@@ -1,187 +1,130 @@
-"""Mojo IPC observation and testing via CDP Tracing + Web API triggers.
+"""Mojo IPC observation and testing.
 
-Chromium's Mojo IPC connects the renderer (sandboxed) to privileged browser
-processes.  This module provides tools to:
+Two complementary approaches:
 
-1. **Trace** — capture Mojo IPC messages via the CDP ``Tracing`` domain
-2. **Trigger** — exercise Web APIs that use Mojo interfaces under the hood
-3. **Analyze** — parse traces to identify interfaces, methods, message patterns
-4. **Fuzz** — send malformed/boundary inputs to Mojo-backed Web APIs
+1. **Passive tracing** (:class:`MojoTracer`)
+   Capture ``mojom``/``ipc`` trace events via the CDP ``Tracing`` domain
+   while exercising Web APIs.  Maps the renderer→browser attack surface.
 
-Usage::
-
-    from harness_android.mojo import MojoTracer
-
-    tracer = MojoTracer(browser)
-    tracer.start_trace()
-    # ... trigger Web APIs ...
-    events = tracer.stop_trace()
-    mojo_msgs = tracer.extract_mojo_messages(events)
-    tracer.print_summary(mojo_msgs)
+2. **Active MojoJS** (:class:`MojoJS`)
+   Drive ``Mojo.bindInterface`` / ``MojoHandle.writeMessage`` directly
+   from the harness over CDP.  Requires Chrome started with
+   ``--enable-blink-features=MojoJS,MojoJSTest`` (call
+   :func:`enable_mojojs`).  Lets you bind any browser-process interface
+   and send raw or typed messages without an HTML page.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import struct
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 from rich.console import Console
 from rich.table import Table
 
-from harness_android.browser import Browser
+from harness_android.browser import Browser, TargetCrashed
+from harness_android.fileserver import FileServer
 
 console = Console()
 
 
 # ======================================================================
-# Trace categories that capture Mojo IPC
+# Constants
 # ======================================================================
+
+MOJOJS_FLAGS = ["--enable-blink-features=MojoJS,MojoJSTest"]
 
 MOJO_TRACE_CATEGORIES = [
     "mojom",
     "ipc",
     "toplevel",
     "toplevel.flow",
+    "disabled-by-default-mojom",
     "disabled-by-default-ipc.flow",
-    "disabled-by-default-toplevel.flow",
 ]
 
-# Additional categories for deeper visibility
 MOJO_VERBOSE_CATEGORIES = [
     *MOJO_TRACE_CATEGORIES,
-    "disabled-by-default-mojom",
-    "blink",
-    "content",
-    "navigation",
-    "ServiceWorker",
-    "loading",
+    "blink", "content", "navigation", "ServiceWorker", "loading",
 ]
 
-
-# ======================================================================
-# Web APIs that trigger Mojo IPC (renderer → browser process)
-# ======================================================================
-
-# Each entry: (name, JS code that triggers it, Mojo interface it exercises)
+# (name, JS expression, expected mojom interface)
 MOJO_WEB_API_TRIGGERS: list[tuple[str, str, str]] = [
-    (
-        "Permissions.query",
-        "navigator.permissions.query({name: 'geolocation'}).then(r => r.state).catch(e => e.message)",
-        "blink.mojom.PermissionService",
-    ),
-    (
-        "Notifications.permission",
-        "Notification.requestPermission().catch(e => e.message)",
-        "blink.mojom.NotificationService",
-    ),
-    (
-        "Clipboard.readText",
-        "navigator.clipboard.readText().catch(e => e.message)",
-        "blink.mojom.ClipboardHost",
-    ),
-    (
-        "Clipboard.writeText",
-        "navigator.clipboard.writeText('harness_test').catch(e => e.message)",
-        "blink.mojom.ClipboardHost",
-    ),
-    (
-        "Geolocation.getCurrentPosition",
-        "new Promise(r => navigator.geolocation.getCurrentPosition(p => r(p.coords.latitude), e => r(e.message)))",
-        "device.mojom.Geolocation",
-    ),
-    (
-        "MediaDevices.enumerateDevices",
-        "navigator.mediaDevices.enumerateDevices().then(d => d.length).catch(e => e.message)",
-        "blink.mojom.MediaDevicesDispatcherHost",
-    ),
-    (
-        "MediaDevices.getUserMedia",
-        "navigator.mediaDevices.getUserMedia({audio: true}).then(() => 'ok').catch(e => e.message)",
-        "blink.mojom.MediaStreamDispatcherHost",
-    ),
-    (
-        "Credentials.get",
-        "navigator.credentials.get({password: true}).then(c => c ? 'found' : 'none').catch(e => e.message)",
-        "blink.mojom.CredentialManager",
-    ),
-    (
-        "WebUSB.getDevices",
-        "navigator.usb.getDevices().then(d => d.length).catch(e => e.message)",
-        "device.mojom.UsbDeviceManager",
-    ),
-    (
-        "WebBluetooth.getAvailability",
-        "navigator.bluetooth.getAvailability().catch(e => e.message)",
-        "blink.mojom.WebBluetoothService",
-    ),
-    (
-        "WebNFC",
-        "typeof NDEFReader !== 'undefined' ? 'available' : 'unavailable'",
-        "device.mojom.NFC",
-    ),
-    (
-        "StorageManager.estimate",
-        "navigator.storage.estimate().then(e => e.quota).catch(e => e.message)",
-        "blink.mojom.QuotaManagerHost",
-    ),
-    (
-        "StorageManager.persist",
-        "navigator.storage.persist().catch(e => e.message)",
-        "blink.mojom.QuotaManagerHost",
-    ),
-    (
-        "CacheStorage.open",
-        "caches.open('harness_test').then(() => 'ok').catch(e => e.message)",
-        "blink.mojom.CacheStorage",
-    ),
-    (
-        "Locks.request",
-        "navigator.locks.request('harness_test', () => 'ok').catch(e => e.message)",
-        "blink.mojom.LockManager",
-    ),
-    (
-        "IndexedDB.open",
-        "new Promise(r => { var req = indexedDB.open('harness_test'); req.onsuccess = () => r('ok'); req.onerror = e => r(e.target.error.message); })",
-        "blink.mojom.IDBFactory",
-    ),
-    (
-        "ServiceWorker.register",
-        "navigator.serviceWorker.register('/sw_harness_test.js').then(() => 'ok').catch(e => e.message)",
-        "blink.mojom.ServiceWorkerContainerHost",
-    ),
-    (
-        "BarcodeDetector",
-        "typeof BarcodeDetector !== 'undefined' ? new BarcodeDetector().detect(new ImageData(1,1)).then(() => 'ok').catch(e => e.message) : 'unavailable'",
-        "shape_detection.mojom.BarcodeDetection",
-    ),
-    (
-        "PaymentRequest",
-        "typeof PaymentRequest !== 'undefined' ? 'available' : 'unavailable'",
-        "payments.mojom.PaymentRequest",
-    ),
-    (
-        "FileSystem.showOpenFilePicker",
-        "typeof showOpenFilePicker !== 'undefined' ? showOpenFilePicker().catch(e => e.message) : 'unavailable'",
-        "blink.mojom.FileSystemAccessManager",
-    ),
-    (
-        "Sensor.Accelerometer",
-        "typeof Accelerometer !== 'undefined' ? new Accelerometer().start() || 'started' : 'unavailable'",
-        "device.mojom.SensorProvider",
-    ),
-    (
-        "WakeLock.request",
-        "navigator.wakeLock.request('screen').then(s => { s.release(); return 'ok'; }).catch(e => e.message)",
-        "blink.mojom.WakeLockService",
-    ),
-    (
-        "SharedWorker",
-        "try { new SharedWorker('data:text/javascript,'); 'ok'; } catch(e) { e.message; }",
-        "blink.mojom.SharedWorkerConnector",
-    ),
+    ("Permissions.query",
+     "navigator.permissions.query({name:'geolocation'}).then(r=>r.state)",
+     "blink.mojom.PermissionService"),
+    ("Notifications.permission",
+     "Notification.requestPermission()",
+     "blink.mojom.NotificationService"),
+    ("Clipboard.readText",
+     "navigator.clipboard.readText()",
+     "blink.mojom.ClipboardHost"),
+    ("Clipboard.writeText",
+     "navigator.clipboard.writeText('harness_test')",
+     "blink.mojom.ClipboardHost"),
+    ("Geolocation.getCurrentPosition",
+     "new Promise(r=>navigator.geolocation.getCurrentPosition("
+     "p=>r(p.coords.latitude),e=>r(e.message),{timeout:3000}))",
+     "device.mojom.Geolocation"),
+    ("MediaDevices.enumerateDevices",
+     "navigator.mediaDevices.enumerateDevices().then(d=>d.length)",
+     "blink.mojom.MediaDevicesDispatcherHost"),
+    ("MediaDevices.getUserMedia",
+     "navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{s.getTracks().forEach(t=>t.stop());return 'ok'})",
+     "blink.mojom.MediaStreamDispatcherHost"),
+    ("Credentials.get",
+     "navigator.credentials.get({password:true}).then(c=>c?'found':'none')",
+     "blink.mojom.CredentialManager"),
+    ("WebUSB.getDevices",
+     "navigator.usb?navigator.usb.getDevices().then(d=>d.length):'unavailable'",
+     "device.mojom.UsbDeviceManager"),
+    ("WebBluetooth.getAvailability",
+     "navigator.bluetooth?navigator.bluetooth.getAvailability():'unavailable'",
+     "blink.mojom.WebBluetoothService"),
+    ("StorageManager.estimate",
+     "navigator.storage.estimate().then(e=>e.quota)",
+     "blink.mojom.QuotaManagerHost"),
+    ("CacheStorage.open",
+     "caches.open('harness_test').then(()=>'ok')",
+     "blink.mojom.CacheStorage"),
+    ("Locks.request",
+     "navigator.locks.request('harness_test',()=>'ok')",
+     "blink.mojom.LockManager"),
+    ("IndexedDB.open",
+     "new Promise(r=>{const q=indexedDB.open('harness_test');"
+     "q.onsuccess=()=>r('ok');q.onerror=e=>r(String(e.target.error))})",
+     "blink.mojom.IDBFactory"),
+    ("ServiceWorker.getRegistrations",
+     "navigator.serviceWorker.getRegistrations().then(r=>r.length)",
+     "blink.mojom.ServiceWorkerContainerHost"),
+    ("WakeLock.request",
+     "navigator.wakeLock.request('screen').then(s=>{s.release();return 'ok'})",
+     "blink.mojom.WakeLockService"),
+    ("Sensor.Accelerometer",
+     "typeof Accelerometer!=='undefined'?(new Accelerometer().start(),'started'):'unavailable'",
+     "device.mojom.SensorProvider"),
+    ("BroadcastChannel",
+     "(()=>{const c=new BroadcastChannel('harness');c.postMessage('x');c.close();return 'ok'})()",
+     "blink.mojom.BroadcastChannelProvider"),
+]
+
+DEFAULT_PERMISSIONS = [
+    "geolocation", "notifications", "clipboardReadWrite",
+    "clipboardSanitizedWrite", "audioCapture", "videoCapture",
+    "sensors", "backgroundSync", "durableStorage", "wakeLockScreen",
+]
+
+FUZZ_STRINGS: list[str] = [
+    "''", "'a'.repeat(10000)", "'a'.repeat(1000000)", "null", "undefined",
+    "0", "-1", "NaN", "Infinity", "true", "false", "[]", "{}",
+    "new ArrayBuffer(0)", "new Uint8Array(0)", "new Blob([])",
+    "Symbol('x')", "Object.create(null)",
+    "'\\x00'.repeat(100)", "'\\ud800'", "'\\udbff\\udfff'",
+    "String.fromCharCode(...Array.from({length:256},(_,i)=>i))",
 ]
 
 
@@ -191,50 +134,203 @@ MOJO_WEB_API_TRIGGERS: list[tuple[str, str, str]] = [
 
 @dataclass
 class MojoMessage:
-    """A single Mojo IPC message extracted from a trace."""
     interface: str = ""
     method: str = ""
-    phase: str = ""          # "send" | "receive"
-    process_name: str = ""
+    phase: str = ""
     process_id: int = 0
-    thread_name: str = ""
     timestamp_us: int = 0
     duration_us: int = 0
     args: dict[str, Any] = field(default_factory=dict)
-    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class TriggerResult:
-    """Result of triggering a Mojo-backed Web API."""
     api_name: str
     mojo_interface: str
     result: Any = None
     error: str = ""
-    duration_ms: float = 0
+    crashed: bool = False
+    duration_ms: float = 0.0
 
 
 # ======================================================================
-# MojoTracer
+# Setup
+# ======================================================================
+
+def enable_mojojs(
+    browser: Browser,
+    *,
+    gen_dir: str | None = None,
+    serve_port: int = 8089,
+    extra_flags: Iterable[str] = (),
+) -> FileServer | None:
+    """Restart the browser with MojoJS enabled and (optionally) serve
+    a Chromium ``gen/`` directory so generated mojom JS bindings resolve.
+
+    Returns the :class:`FileServer` if *gen_dir* was provided, else None.
+    """
+    browser.add_flags(*MOJOJS_FLAGS, *extra_flags)
+    browser.enable_cdp()
+
+    server: FileServer | None = None
+    if gen_dir:
+        server = FileServer(gen_dir, port=serve_port)
+        server.start()
+        # Reverse-forward so the device reaches the host on 127.0.0.1.
+        browser.adb.reverse(serve_port, serve_port)
+
+    browser.connect()
+    if not browser.evaluate_js("typeof Mojo !== 'undefined'"):
+        raise RuntimeError(
+            "MojoJS not available — the browser ignored "
+            "--enable-blink-features=MojoJS,MojoJSTest. Use a debuggable build."
+        )
+    console.print("[green bold]MojoJS enabled — Mojo.bindInterface is available.")
+    return server
+
+
+# ======================================================================
+# Active MojoJS driver
+# ======================================================================
+
+class MojoJS:
+    """Drive ``Mojo.*`` from the harness over CDP — no HTML page required.
+
+    Maintains a JS-side registry of open pipe handles so multiple
+    interfaces can be bound and addressed by index.
+    """
+
+    _BOOTSTRAP = """
+    if (!window.__mojo) {
+      window.__mojo = {
+        handles: [],
+        bind(name, scope) {
+          const p = Mojo.createMessagePipe();
+          Mojo.bindInterface(name, p.handle1, scope || 'process');
+          this.handles.push(p.handle0);
+          return this.handles.length - 1;
+        },
+        write(idx, b64, handles) {
+          const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+          const h = this.handles[idx];
+          if (!h || !h.writeMessage)
+            throw new Error('writeMessage unavailable (need MojoJSTest)');
+          return h.writeMessage(raw, handles || []);
+        },
+        watch(idx) {
+          return new Promise(res => {
+            const h = this.handles[idx];
+            const w = h.watch({readable: true}, () => {
+              w.cancel();
+              res(h.readMessage());
+            });
+            setTimeout(() => { try { w.cancel(); } catch(e){} res(null); }, 5000);
+          });
+        },
+        close(idx) {
+          const h = this.handles[idx];
+          if (h) { h.close(); this.handles[idx] = null; }
+        },
+      };
+    }
+    true
+    """
+
+    def __init__(self, browser: Browser):
+        self.browser = browser
+        if not browser.evaluate_js("typeof Mojo !== 'undefined'"):
+            raise RuntimeError("MojoJS not enabled — call enable_mojojs() first.")
+        browser.evaluate_js(self._BOOTSTRAP)
+
+    def bind(self, interface: str, scope: str = "process") -> int:
+        """Bind *interface* in the browser process. Returns a handle index."""
+        return int(self.browser.evaluate_js(
+            f"__mojo.bind({json.dumps(interface)}, {json.dumps(scope)})"
+        ))
+
+    def write(self, handle: int, payload: bytes) -> Any:
+        b64 = base64.b64encode(payload).decode("ascii")
+        return self.browser.evaluate_js(
+            f"__mojo.write({handle}, {json.dumps(b64)})",
+            await_promise=False,
+        )
+
+    def read(self, handle: int) -> dict | None:
+        return self.browser.evaluate_js(f"__mojo.watch({handle})", await_promise=True)
+
+    def close(self, handle: int) -> None:
+        self.browser.evaluate_js(f"__mojo.close({handle})")
+
+    @staticmethod
+    def make_header(name: int = 0, flags: int = 0, request_id: int = 0) -> bytes:
+        """Build a minimal v1 Mojo message header (for raw fuzzing)."""
+        # struct: num_bytes(u32) version(u32) name(u32) flags(u32) request_id(u64)
+        return struct.pack("<IIIIq", 24, 1, name, flags, request_id)
+
+    def fuzz_interface(
+        self,
+        interface: str,
+        payloads: Iterable[bytes],
+        *,
+        scope: str = "process",
+        settle_ms: int = 50,
+    ) -> list[TriggerResult]:
+        """Bind *interface* and write each payload, detecting renderer crashes."""
+        results: list[TriggerResult] = []
+        console.print(f"[bold]Fuzzing {interface} (raw IPC) …")
+        for i, payload in enumerate(payloads):
+            r = TriggerResult(api_name=f"raw#{i}", mojo_interface=interface)
+            t0 = time.monotonic()
+            try:
+                h = self.bind(interface, scope)
+                self.write(h, payload)
+                # Give the browser process time to handle the message before
+                # we close — otherwise it may be discarded on disconnect.
+                time.sleep(settle_ms / 1000)
+                self.close(h)
+                # Probe liveness — raises TargetCrashed if the renderer died.
+                self.browser.evaluate_js("1")
+                r.result = f"{len(payload)}b sent"
+            except TargetCrashed as exc:
+                r.crashed = True
+                r.error = str(exc)
+                console.print(f"  [red bold]CRASH[/]  payload #{i} ({len(payload)}b)")
+                self.browser.reconnect()
+                self.browser.evaluate_js(self._BOOTSTRAP)
+            except Exception as exc:  # noqa: BLE001
+                r.error = str(exc)
+            r.duration_ms = (time.monotonic() - t0) * 1000
+            status = "[red]CRASH" if r.crashed else ("[yellow]err" if r.error else "[green]ok")
+            console.print(f"  {status}[/]  #{i:<3} {len(payload):>6}b  {r.error[:60]}")
+            results.append(r)
+        return results
+
+    @staticmethod
+    def default_payloads() -> list[bytes]:
+        hdr = MojoJS.make_header
+        return [
+            b"",
+            b"\x00" * 4,
+            hdr(),
+            hdr(name=0xFFFFFFFF),
+            hdr(flags=0xFFFFFFFF),
+            hdr() + b"\x41" * 256,
+            hdr() + b"\xFF" * 256,
+            hdr() + bytes(range(256)),
+            b"\xFF" * 24,
+            hdr() + b"\x00" * 65536,
+        ]
+
+
+# ======================================================================
+# Passive tracer
 # ======================================================================
 
 class MojoTracer:
-    """Trace and analyze Mojo IPC through Chrome's tracing infrastructure.
+    """Capture and analyse Mojo IPC via the CDP ``Tracing`` domain."""
 
-    Usage::
-
-        tracer = MojoTracer(browser)
-
-        # Capture a trace while triggering Web APIs
-        tracer.start_trace()
-        results = tracer.trigger_all_apis()
-        events = tracer.stop_trace()
-
-        # Analyze
-        messages = tracer.extract_mojo_messages(events)
-        tracer.print_summary(messages)
-        tracer.dump("mojo_trace.json", events, messages)
-    """
+    # Backward-compat alias for older example scripts.
+    FUZZ_STRINGS = FUZZ_STRINGS
 
     def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
@@ -242,399 +338,223 @@ class MojoTracer:
         self._tracing = False
         self._trace_events: list[dict] = []
 
-    # ------------------------------------------------------------------
-    # Tracing
-    # ------------------------------------------------------------------
+    # -- tracing --------------------------------------------------------
 
     def start_trace(self) -> None:
-        """Start capturing Mojo IPC via the CDP Tracing domain."""
-        categories = MOJO_VERBOSE_CATEGORIES if self.verbose else MOJO_TRACE_CATEGORIES
+        cats = MOJO_VERBOSE_CATEGORIES if self.verbose else MOJO_TRACE_CATEGORIES
         self.browser.send("Tracing.start", {
-            "traceConfig": {
-                "includedCategories": categories,
-                "recordMode": "recordUntilFull",
-            },
+            "traceConfig": {"includedCategories": cats, "recordMode": "recordUntilFull"},
             "transferMode": "ReturnAsStream",
         })
         self._tracing = True
         self._trace_events = []
-        console.print(f"[green]Mojo trace started ({len(categories)} categories)")
+        console.print(f"[green]Mojo trace started ({len(cats)} categories)")
 
-    def stop_trace(self) -> list[dict]:
-        """Stop tracing and return all trace events."""
+    def stop_trace(self, *, timeout: float = 60) -> list[dict]:
         if not self._tracing:
             return []
-
-        # End tracing — Chrome will send events via Tracing.tracingComplete
         self.browser.send("Tracing.end")
         self._tracing = False
 
-        # Collect trace data by polling
-        # The events come as Tracing.dataCollected events and finally
-        # Tracing.tracingComplete. We read from the WebSocket directly.
+        # All events are buffered by the CDP session — drain them properly.
+        ev = self.browser.wait_event("Tracing.tracingComplete", timeout=timeout)
         events: list[dict] = []
-        ws = self.browser._ws
-        assert ws is not None
+        for chunk in self.browser.drain_events("Tracing.dataCollected"):
+            events.extend(chunk.get("params", {}).get("value", []))
 
-        deadline = time.monotonic() + 30
-        complete = False
-        while time.monotonic() < deadline and not complete:
-            try:
-                ws.settimeout(5.0)
-                raw = ws.recv()
-                data = json.loads(raw)
-                method = data.get("method", "")
-                if method == "Tracing.dataCollected":
-                    chunk = data.get("params", {}).get("value", [])
-                    events.extend(chunk)
-                elif method == "Tracing.tracingComplete":
-                    # Check if there's a stream to read
-                    stream = data.get("params", {}).get("stream")
-                    if stream:
-                        events.extend(self._read_trace_stream(stream))
-                    complete = True
-            except Exception:  # noqa: BLE001
-                # Timeout — check if we have data
-                if events:
-                    complete = True
+        stream = ev.get("params", {}).get("stream")
+        if stream:
+            events.extend(self._read_trace_stream(stream))
 
         self._trace_events = events
         console.print(f"[green]Trace stopped — {len(events)} events captured")
         return events
 
-    def _read_trace_stream(self, stream_handle: str) -> list[dict]:
-        """Read trace data from an IO stream handle."""
-        events: list[dict] = []
-        buf = ""
+    def _read_trace_stream(self, handle: str) -> list[dict]:
+        chunks: list[str] = []
         while True:
-            result = self.browser.send("IO.read", {
-                "handle": stream_handle,
-                "size": 1 << 20,  # 1 MB chunks
-            })
-            chunk = result.get("data", "")
-            if result.get("base64Encoded", False):
-                chunk = base64.b64decode(chunk).decode("utf-8", errors="replace")
-            buf += chunk
-            eof = result.get("eof", False)
-            if eof:
+            r = self.browser.send("IO.read", {"handle": handle, "size": 1 << 20})
+            data = r.get("data", "")
+            if r.get("base64Encoded"):
+                data = base64.b64decode(data).decode("utf-8", errors="replace")
+            chunks.append(data)
+            if r.get("eof"):
                 break
+        self.browser.send("IO.close", {"handle": handle})
 
-        self.browser.send("IO.close", {"handle": stream_handle})
-
-        # Parse the JSON trace format
+        buf = "".join(chunks)
         try:
             parsed = json.loads(buf)
-            if isinstance(parsed, list):
-                events = parsed
-            elif isinstance(parsed, dict):
-                events = parsed.get("traceEvents", [])
         except json.JSONDecodeError:
-            # Try line-by-line (JSON array stream)
-            for line in buf.strip().rstrip(",").split("\n"):
-                line = line.strip().rstrip(",")
-                if line and line not in ("[", "]"):
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
+            # Trace JSON is sometimes emitted unterminated; close the array.
+            try:
+                parsed = json.loads(buf.rstrip().rstrip(",") + "]")
+            except json.JSONDecodeError:
+                console.print("[yellow]Could not parse trace stream as JSON")
+                return []
+        if isinstance(parsed, dict):
+            return parsed.get("traceEvents", [])
+        return parsed if isinstance(parsed, list) else []
 
-        return events
-
-    # ------------------------------------------------------------------
-    # Message extraction
-    # ------------------------------------------------------------------
+    # -- analysis -------------------------------------------------------
 
     def extract_mojo_messages(self, events: list[dict] | None = None) -> list[MojoMessage]:
-        """Parse trace events and extract Mojo IPC messages."""
         if events is None:
             events = self._trace_events
 
-        messages: list[MojoMessage] = []
+        msgs: list[MojoMessage] = []
         for ev in events:
             cat = ev.get("cat", "")
             name = ev.get("name", "")
             args = ev.get("args", {})
 
-            # Mojo IPC events have patterns like:
-            # cat=mojom, name=<Interface>::<Method>
-            # cat=ipc, name=IPC_Message (older)
-            # cat=toplevel, name=Receive ... mojo::...
-
-            msg = None
-
-            if "mojom" in cat:
-                msg = MojoMessage(
-                    raw=ev,
-                    args=args,
-                    timestamp_us=ev.get("ts", 0),
-                    duration_us=ev.get("dur", 0),
-                    process_id=ev.get("pid", 0),
-                    phase=ev.get("ph", ""),
-                )
-                # Parse interface::method from name
-                if "::" in name:
-                    parts = name.rsplit("::", 1)
-                    msg.interface = parts[0]
-                    msg.method = parts[1]
+            iface, method = "", ""
+            if "mojom" in cat or ".mojom." in name:
+                # name format: "Send mojo::Foo::Bar" / "blink.mojom.X::Y" / "X.Y"
+                token = name
+                for prefix in ("Send ", "Receive ", "Call ", "Invoke "):
+                    if token.startswith(prefix):
+                        token = token[len(prefix):]
+                        break
+                if "::" in token:
+                    iface, method = token.rsplit("::", 1)
+                elif "." in token:
+                    iface, method = token.rsplit(".", 1)
                 else:
-                    msg.interface = name
-
-            elif "ipc" in cat and ("mojo" in name.lower() or "message" in name.lower()):
-                msg = MojoMessage(
-                    raw=ev,
-                    args=args,
-                    interface=args.get("interface", name),
-                    method=args.get("method", ""),
-                    timestamp_us=ev.get("ts", 0),
-                    duration_us=ev.get("dur", 0),
-                    process_id=ev.get("pid", 0),
-                    phase=ev.get("ph", ""),
-                )
-
-            elif "toplevel" in cat and "mojo" in name.lower():
-                msg = MojoMessage(
-                    raw=ev,
-                    args=args,
-                    interface=name,
-                    timestamp_us=ev.get("ts", 0),
-                    duration_us=ev.get("dur", 0),
-                    process_id=ev.get("pid", 0),
-                    phase=ev.get("ph", ""),
-                )
-
-            if msg:
-                messages.append(msg)
-
-        return messages
-
-    # ------------------------------------------------------------------
-    # Web API triggering
-    # ------------------------------------------------------------------
-
-    def trigger_api(self, name: str, js: str, mojo_interface: str) -> TriggerResult:
-        """Trigger a single Mojo-backed Web API and return the result."""
-        result = TriggerResult(api_name=name, mojo_interface=mojo_interface)
-        start = time.monotonic()
-        try:
-            # Wrap in a 5-second timeout so permission-blocked APIs don't hang
-            timeout_js = (
-                f"Promise.race(["
-                f"  (async () => {{ return {js}; }})(),"
-                f"  new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))"
-                f"])"
-            )
-            val = self.browser.send(
-                "Runtime.evaluate",
-                {
-                    "expression": timeout_js,
-                    "returnByValue": True,
-                    "awaitPromise": True,
-                },
-            )
-            exc_details = val.get("exceptionDetails")
-            if exc_details:
-                result.result = exc_details.get("text", "error")
+                    iface = token
+            elif "ipc" in cat and isinstance(args, dict) and "name" in args.get("info", {}):
+                iface = args["info"]["name"]
             else:
-                remote_obj = val.get("result", {})
-                result.result = remote_obj.get("value")
-        except Exception as exc:  # noqa: BLE001
-            result.error = str(exc)
-        result.duration_ms = (time.monotonic() - start) * 1000
-        return result
+                continue
 
-    def trigger_all_apis(self) -> list[TriggerResult]:
-        """Trigger all known Mojo-backed Web APIs and return results."""
-        # Auto-grant permissions for the current origin to suppress prompts
+            msgs.append(MojoMessage(
+                interface=iface,
+                method=method,
+                phase=ev.get("ph", ""),
+                process_id=ev.get("pid", 0),
+                timestamp_us=ev.get("ts", 0),
+                duration_us=ev.get("dur", 0),
+                args=args if isinstance(args, dict) else {},
+            ))
+        return msgs
+
+    # -- triggering -----------------------------------------------------
+
+    def _eval_with_timeout(self, js: str, ms: int = 5000) -> Any:
+        wrapped = (
+            "Promise.race(["
+            f"(async()=>{{try{{return await ({js})}}catch(e){{return 'err:'+e.message}}}})(),"
+            f"new Promise(r=>setTimeout(()=>r('timeout'),{ms}))"
+            "])"
+        )
+        return self.browser.evaluate_js(wrapped, await_promise=True, timeout=ms / 1000 + 10)
+
+    def trigger_api(self, name: str, js: str, iface: str) -> TriggerResult:
+        r = TriggerResult(api_name=name, mojo_interface=iface)
+        t0 = time.monotonic()
         try:
-            origin = self.browser.evaluate_js("window.location.origin") or ""
-            self.browser.send("Browser.grantPermissions", {
-                "origin": origin,
-                "permissions": [
-                    "geolocation", "notifications", "clipboardReadWrite",
-                    "clipboardSanitizedWrite", "midi", "cameraPanTiltZoom",
-                    "audioCapture", "videoCapture", "sensors",
-                    "backgroundSync", "durableStorage",
-                ],
-            })
-        except Exception:  # noqa: BLE001
-            pass  # older Chrome may not support all permissions
+            r.result = self._eval_with_timeout(js)
+        except TargetCrashed as exc:
+            r.crashed, r.error = True, str(exc)
+            self.browser.reconnect()
+        except Exception as exc:  # noqa: BLE001
+            r.error = str(exc)
+        r.duration_ms = (time.monotonic() - t0) * 1000
+        return r
+
+    def trigger_all_apis(self, *, origin: str | None = None) -> list[TriggerResult]:
+        origin = origin or self.browser.evaluate_js("location.origin")
+        try:
+            self.browser.grant_permissions(DEFAULT_PERMISSIONS, origin=origin)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[dim]grant_permissions skipped: {exc}")
 
         console.print(f"[bold]Triggering {len(MOJO_WEB_API_TRIGGERS)} Mojo-backed Web APIs …")
-        results: list[TriggerResult] = []
+        out: list[TriggerResult] = []
         for name, js, iface in MOJO_WEB_API_TRIGGERS:
             r = self.trigger_api(name, js, iface)
-            status = "[green]ok" if not r.error else "[red]err"
-            console.print(f"  {status}[/]  {name:40s} → {r.result or r.error}")
-            results.append(r)
-        return results
+            tag = "[red]CRASH" if r.crashed else ("[yellow]err" if r.error else "[green]ok")
+            console.print(f"  {tag}[/]  {name:38s} → {r.error or r.result}")
+            out.append(r)
+            if r.crashed:
+                break
+        return out
 
-    def trigger_selected_apis(self, *api_names: str) -> list[TriggerResult]:
-        """Trigger specific APIs by name."""
-        results: list[TriggerResult] = []
-        for name, js, iface in MOJO_WEB_API_TRIGGERS:
-            if name in api_names:
-                results.append(self.trigger_api(name, js, iface))
-        return results
+    def trigger_selected_apis(self, *names: str) -> list[TriggerResult]:
+        return [self.trigger_api(n, j, i)
+                for n, j, i in MOJO_WEB_API_TRIGGERS if n in names]
 
-    # ------------------------------------------------------------------
-    # Fuzzing helpers
-    # ------------------------------------------------------------------
-
-    def fuzz_api(
-        self,
-        api_name: str,
-        js_template: str,
-        inputs: list[str],
-        mojo_interface: str = "",
-    ) -> list[TriggerResult]:
-        """Fuzz a Web API by substituting each input into *js_template*.
-
-        The template should contain ``{FUZZ}`` as a placeholder::
-
-            tracer.fuzz_api(
-                "Clipboard.writeText",
-                "navigator.clipboard.writeText({FUZZ}).catch(e => e.message)",
-                ["'a'*10000", "null", "undefined", "0", "[]", "{{}}"],
-                "blink.mojom.ClipboardHost",
-            )
-        """
+    def fuzz_api(self, api_name: str, js_template: str,
+                 inputs: list[str], iface: str = "") -> list[TriggerResult]:
         console.print(f"[bold]Fuzzing {api_name} with {len(inputs)} inputs …")
-        results: list[TriggerResult] = []
+        out: list[TriggerResult] = []
         for inp in inputs:
-            js = js_template.replace("{FUZZ}", inp)
-            r = self.trigger_api(f"{api_name}[{inp[:30]}]", js, mojo_interface)
-            results.append(r)
-        return results
+            r = self.trigger_api(f"{api_name}[{inp[:30]}]",
+                                 js_template.replace("{FUZZ}", inp), iface)
+            out.append(r)
+            if r.crashed:
+                break
+        return out
 
-    # Common fuzz payloads for string-accepting APIs
-    FUZZ_STRINGS: list[str] = [
-        "''",
-        "'a'.repeat(10000)",
-        "'a'.repeat(1000000)",
-        "null",
-        "undefined",
-        "0",
-        "-1",
-        "NaN",
-        "Infinity",
-        "true",
-        "false",
-        "[]",
-        "{}",
-        "new ArrayBuffer(0)",
-        "new Uint8Array(0)",
-        "new Blob([])",
-        "Symbol('test')",
-        "Object.create(null)",
-        "'\\x00'.repeat(100)",
-        "'\\ud800'",                   # lone surrogate
-        "'\\udbff\\udfff'",            # max surrogate pair
-        "String.fromCharCode(...Array.from({length: 256}, (_, i) => i))",
-    ]
-
-    # ------------------------------------------------------------------
-    # Output
-    # ------------------------------------------------------------------
+    # -- output ---------------------------------------------------------
 
     def print_summary(self, messages: list[MojoMessage] | None = None) -> None:
-        """Print a summary table of Mojo messages."""
-        if messages is None:
-            messages = self.extract_mojo_messages()
-
+        messages = messages if messages is not None else self.extract_mojo_messages()
         if not messages:
             console.print("[yellow]No Mojo IPC messages captured.")
             return
-
-        # Count by interface
-        iface_counts: dict[str, int] = {}
-        method_counts: dict[str, int] = {}
+        counts: dict[str, int] = {}
         for m in messages:
-            iface_counts[m.interface] = iface_counts.get(m.interface, 0) + 1
-            if m.method:
-                key = f"{m.interface}::{m.method}"
-                method_counts[key] = method_counts.get(key, 0) + 1
-
+            key = f"{m.interface}::{m.method}" if m.method else m.interface
+            counts[key] = counts.get(key, 0) + 1
         t = Table(title=f"Mojo IPC Summary ({len(messages)} messages)")
-        t.add_column("Interface", style="bold")
+        t.add_column("Interface::Method", style="bold")
         t.add_column("Count", justify="right")
-        for iface, count in sorted(iface_counts.items(), key=lambda x: -x[1]):
-            t.add_row(iface, str(count))
+        for k, v in sorted(counts.items(), key=lambda x: -x[1])[:50]:
+            t.add_row(k, str(v))
         console.print(t)
-
-        if method_counts:
-            t2 = Table(title="Top methods")
-            t2.add_column("Interface::Method", style="bold")
-            t2.add_column("Count", justify="right")
-            for method, count in sorted(method_counts.items(), key=lambda x: -x[1])[:30]:
-                t2.add_row(method, str(count))
-            console.print(t2)
 
     def print_trigger_results(self, results: list[TriggerResult]) -> None:
         t = Table(title="Web API Trigger Results")
         t.add_column("API", style="bold")
         t.add_column("Mojo Interface")
         t.add_column("Result")
-        t.add_column("Time (ms)", justify="right")
+        t.add_column("ms", justify="right")
         for r in results:
-            val = str(r.error or r.result)[:60]
-            t.add_row(r.api_name, r.mojo_interface, val, f"{r.duration_ms:.0f}")
+            mark = "[red]CRASH " if r.crashed else ""
+            t.add_row(r.api_name, r.mojo_interface,
+                      f"{mark}{str(r.error or r.result)[:60]}", f"{r.duration_ms:.0f}")
         console.print(t)
 
-    def dump(
-        self,
-        path: str = "mojo_trace.json",
-        events: list[dict] | None = None,
-        messages: list[MojoMessage] | None = None,
-        trigger_results: list[TriggerResult] | None = None,
-    ) -> None:
-        """Write trace data, extracted messages, and trigger results to JSON."""
-        data: dict[str, Any] = {}
-
-        if events is None:
-            events = self._trace_events
-        data["trace_event_count"] = len(events)
-
+    def dump(self, path: str = "mojo_trace.json",
+             events: list[dict] | None = None,
+             messages: list[MojoMessage] | None = None,
+             trigger_results: list[TriggerResult] | None = None) -> None:
+        events = events if events is not None else self._trace_events
+        data: dict[str, Any] = {"trace_event_count": len(events)}
         if messages is not None:
             data["mojo_messages"] = [
-                {
-                    "interface": m.interface,
-                    "method": m.method,
-                    "phase": m.phase,
-                    "process_id": m.process_id,
-                    "timestamp_us": m.timestamp_us,
-                    "duration_us": m.duration_us,
-                }
+                {"interface": m.interface, "method": m.method, "phase": m.phase,
+                 "pid": m.process_id, "ts": m.timestamp_us, "dur": m.duration_us}
                 for m in messages
             ]
-
         if trigger_results is not None:
             data["trigger_results"] = [
-                {
-                    "api": r.api_name,
-                    "mojo_interface": r.mojo_interface,
-                    "result": str(r.result),
-                    "error": r.error,
-                    "duration_ms": r.duration_ms,
-                }
+                {"api": r.api_name, "interface": r.mojo_interface,
+                 "result": str(r.result), "error": r.error,
+                 "crashed": r.crashed, "ms": r.duration_ms}
                 for r in trigger_results
             ]
-
-        # Save the raw trace separately (it can be huge)
         if events:
-            trace_path = path.replace(".json", "_raw.json")
-            with open(trace_path, "w") as f:
+            raw_path = path.replace(".json", "_raw.json")
+            with open(raw_path, "w") as f:
                 json.dump({"traceEvents": events}, f)
-            console.print(f"[dim]Raw trace ({len(events)} events) → {trace_path}")
-
+            console.print(f"[dim]Raw trace ({len(events)} events) → {raw_path}")
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
         console.print(f"[green]Mojo analysis saved to {path}")
 
     def dump_chrome_trace(self, path: str = "chrome_trace.json") -> None:
-        """Save raw trace in Chrome's trace viewer format (chrome://tracing)."""
         with open(path, "w") as f:
             json.dump({"traceEvents": self._trace_events}, f)
-        console.print(
-            f"[green]Chrome trace saved to {path}\n"
-            "[dim]Open chrome://tracing and load this file to visualize."
-        )
+        console.print(f"[green]Chrome trace → {path} (open in chrome://tracing)")

@@ -10,7 +10,7 @@ from typing import Optional
 
 from rich.console import Console
 
-from harness_android.adb import ADB
+from harness_android.adb import ADB, poll_until
 from harness_android.config import (
     DEFAULT_API_LEVEL,
     DEFAULT_AVD_NAME,
@@ -28,7 +28,6 @@ console = Console()
 
 
 def _emulator_env(**extra: str) -> dict[str, str]:
-    """Build env dict with JAVA_HOME, ANDROID_SDK_ROOT, and extras."""
     env = {
         **os.environ,
         "ANDROID_SDK_ROOT": str(get_sdk_root()),
@@ -52,7 +51,7 @@ class Emulator:
     ):
         self.avd_name = avd_name
         self.api_level = api_level
-        self._process: Optional[subprocess.Popen[str]] = None
+        self._process: Optional[subprocess.Popen] = None
         self._serial: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -64,7 +63,6 @@ class Emulator:
         device_profile: str = DEFAULT_DEVICE_PROFILE,
         force: bool = False,
     ) -> None:
-        """Create an AVD using avdmanager."""
         avdmanager = get_avdmanager()
         if not avdmanager.exists():
             raise FileNotFoundError(
@@ -89,11 +87,7 @@ class Emulator:
 
         console.print(f"[bold]Creating AVD '{self.avd_name}' (API {self.api_level}) …")
         result = subprocess.run(
-            cmd,
-            input="no\n",  # don't create custom hardware profile
-            capture_output=True,
-            text=True,
-            env=env,
+            cmd, input="no\n", capture_output=True, text=True, env=env,
         )
         if result.returncode != 0:
             console.print(f"[red]avdmanager error:\n{result.stderr}")
@@ -101,17 +95,14 @@ class Emulator:
         console.print(f"[green]AVD '{self.avd_name}' created.")
 
     def avd_exists(self) -> bool:
-        avd_path = get_avd_root() / self.avd_name
-        return avd_path.is_dir()
+        return (get_avd_root() / self.avd_name).is_dir()
 
     def delete_avd(self) -> None:
         avdmanager = get_avdmanager()
         env = _emulator_env(ANDROID_AVD_HOME=str(get_avd_root()))
         subprocess.run(
             [str(avdmanager), "delete", "avd", "--name", self.avd_name],
-            capture_output=True,
-            text=True,
-            env=env,
+            capture_output=True, text=True, env=env,
         )
         console.print(f"[yellow]AVD '{self.avd_name}' deleted.")
 
@@ -128,27 +119,11 @@ class Emulator:
         wipe_data: bool = False,
         cold_boot: bool = False,
         no_snapshot_save: bool = False,
+        writable_system: bool = False,
         extra_args: Optional[list[str]] = None,
+        boot_timeout: float = 300,
     ) -> ADB:
-        """Launch the emulator and return an :class:`ADB` handle.
-
-        Parameters
-        ----------
-        headless:
-            Run without a window (``-no-window``).
-        gpu:
-            GPU mode – ``auto``, ``host``, ``swiftshader_indirect``, ``off``.
-        ram:
-            RAM in MB.
-        wipe_data:
-            Wipe user data on start.
-        cold_boot:
-            Force cold boot, ignoring any saved snapshot.
-        no_snapshot_save:
-            Don't save snapshot on exit (useful during fuzzing).
-        extra_args:
-            Any additional emulator flags.
-        """
+        """Launch the emulator and return an :class:`ADB` handle once booted."""
         emulator = get_emulator_bin()
         if not emulator.exists():
             raise FileNotFoundError(
@@ -161,6 +136,7 @@ class Emulator:
             "-gpu", gpu,
             "-memory", str(ram),
             "-no-boot-anim",
+            "-read-only" if not writable_system else "-writable-system",
         ]
         if headless:
             cmd.append("-no-window")
@@ -175,44 +151,63 @@ class Emulator:
 
         env = _emulator_env(ANDROID_AVD_HOME=str(get_avd_root()))
 
-        console.print(f"[bold]Starting emulator '{self.avd_name}' …")
-        # Launch in the background; emulator writes to its own console
-        self._process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Give the process a moment, then figure out the serial
-        time.sleep(3)
-        self._serial = self._detect_serial()
-        adb = ADB(serial=self._serial)
-        adb.wait_for_device()
-        adb.wait_for_boot()
-        return adb
+        # Snapshot existing devices so we can identify the *new* one.
+        before = {d["serial"] for d in ADB.list_devices()}
 
-    def _detect_serial(self) -> str:
-        """Return the serial string for the running emulator."""
-        adb = ADB()
-        # Poll a few times – the emulator may need a moment to register
-        for _ in range(30):
-            devices = adb.list_devices()
-            for d in devices:
-                if d["serial"].startswith("emulator-") and d["state"] == "device":
+        console.print(f"[bold]Starting emulator '{self.avd_name}' …")
+        # Redirect emulator output to a file (NOT a pipe — the emulator is
+        # chatty and would deadlock once the pipe buffer fills).
+        self._log_path = get_avd_root() / f"{self.avd_name}.log"
+        log_fh = open(self._log_path, "w", encoding="utf-8", errors="replace")
+        self._process = subprocess.Popen(
+            cmd, env=env, stdout=log_fh, stderr=subprocess.STDOUT,
+        )
+        log_fh.close()  # child holds its own handle now
+
+        deadline = time.monotonic() + boot_timeout
+
+        def _new_serial() -> str | None:
+            if self._process and self._process.poll() is not None:
+                tail = ""
+                try:
+                    tail = self._log_path.read_text(errors="replace")[-2000:]
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    f"Emulator process exited (rc={self._process.returncode}) "
+                    f"before registering with ADB. See {self._log_path}\n{tail}"
+                )
+            for d in ADB.list_devices():
+                if d["serial"].startswith("emulator-") and d["serial"] not in before:
                     return d["serial"]
-            time.sleep(2)
-        raise TimeoutError("Could not detect emulator serial")
+            return None
+
+        self._serial = poll_until(
+            _new_serial,
+            timeout=max(10.0, deadline - time.monotonic()),
+            interval=1.0,
+            desc="emulator serial",
+        )
+        console.print(f"[dim]Emulator serial: {self._serial}")
+
+        adb = ADB(serial=self._serial)
+        adb.wait_for_device(timeout=max(10.0, deadline - time.monotonic()))
+        adb.wait_for_boot(timeout=max(30.0, deadline - time.monotonic()))
+        return adb
 
     def stop(self) -> None:
         """Shut down the emulator gracefully."""
         if self._serial:
-            adb = ADB(serial=self._serial)
-            adb.run("emu", "kill", check=False, timeout=15)
+            try:
+                ADB(serial=self._serial).run("emu", "kill", check=False, timeout=15)
+            except Exception:  # noqa: BLE001
+                pass
         if self._process:
             try:
                 self._process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait(timeout=5)
             self._process = None
         console.print("[yellow]Emulator stopped.")
 
@@ -222,6 +217,4 @@ class Emulator:
 
     @property
     def running(self) -> bool:
-        if self._process is None:
-            return False
-        return self._process.poll() is None
+        return self._process is not None and self._process.poll() is None

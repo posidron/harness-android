@@ -332,23 +332,25 @@ def fuzz_component(
     results: list[FuzzResult] = []
     console.print(f"[bold]Fuzzing {component} ({len(payloads)} payloads) …")
 
+    pkg = component.split("/")[0]
     for payload in payloads:
-        # Check if target process is alive before
-        pkg = component.split("/")[0]
-        pid_before = adb.run("shell", f"pidof {pkg}", check=False, timeout=5).stdout.strip()
+        pid_before = adb.pidof(pkg)
 
-        # Send the intent
-        cmd_args = ["am", am_verb, "-n", component] + payload.am_args
+        cmd_args = ["am", am_verb, "-n", component, *payload.am_args]
         start = time.monotonic()
-        result = adb.run("shell", *cmd_args, check=False, timeout=10)
+        result = adb.run("shell", *cmd_args, check=False, timeout=15)
         elapsed = (time.monotonic() - start) * 1000
 
-        # Small delay for crash to register
-        time.sleep(0.3)
-
-        # Check if process is still alive
-        pid_after = adb.run("shell", f"pidof {pkg}", check=False, timeout=5).stdout.strip()
-        crashed = bool(pid_before) and not bool(pid_after)
+        # Poll for process death/restart (don't trust a single 300ms sample
+        # on a laggy emulator).
+        crashed = False
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            pid_after = adb.pidof(pkg)
+            if pid_before and (pid_after is None or pid_after != pid_before):
+                crashed = True
+                break
+            time.sleep(0.2)
 
         error = ""
         if result.returncode != 0:
@@ -368,9 +370,11 @@ def fuzz_component(
             duration_ms=elapsed,
         ))
 
-        # If crashed, wait for restart
         if crashed:
-            time.sleep(2)
+            # Wait for the process to come back before the next iteration.
+            restart_deadline = time.monotonic() + 5.0
+            while time.monotonic() < restart_deadline and not adb.pidof(pkg):
+                time.sleep(0.3)
 
     return results
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+from dataclasses import asdict
 from pathlib import Path
 
 from rich.console import Console
@@ -31,6 +33,58 @@ console = Console()
 
 def _find_serial(args: argparse.Namespace) -> str | None:
     return getattr(args, "serial", None)
+
+
+def _make_adb(args: argparse.Namespace) -> ADB:
+    return ADB(serial=_find_serial(args))
+
+
+def _make_browser(
+    args: argparse.Namespace,
+    *,
+    extra_flags: list[str] | None = None,
+    connect: bool = True,
+) -> Browser:
+    """Build, enable and connect a Browser from common CLI args."""
+    adb = _make_adb(args)
+    flags = list(extra_flags or [])
+    if getattr(args, "chrome_flags", None):
+        flags.extend(args.chrome_flags.split())
+    b = Browser(
+        adb,
+        local_port=getattr(args, "port", CDP_LOCAL_PORT),
+        browser=getattr(args, "browser", None) or "chrome",
+        extra_flags=flags,
+    )
+    b.enable_cdp()
+    if connect:
+        b.connect()
+    return b
+
+
+def _repl(browser: Browser, *, mode: str = "cdp") -> None:
+    """Interactive loop: ``cdp`` mode parses ``Method {json}``,
+    ``js`` mode evaluates raw JavaScript."""
+    hint = "Method {json-params}" if mode == "cdp" else "JavaScript expression"
+    console.print(f"[bold]REPL ({mode})[/] — {hint}. Type 'quit' or Ctrl+C to exit.")
+    while True:
+        try:
+            line = input(f"{mode}> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line or line in ("quit", "exit"):
+            break
+        try:
+            if mode == "js":
+                result = browser.evaluate_js(line, await_promise=True)
+            else:
+                method, _, rest = line.partition(" ")
+                params = json.loads(rest) if rest else None
+                result = browser.send(method, params)
+            console.print(json.dumps(result, indent=2, default=str))
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]{type(exc).__name__}: {exc}")
 
 
 # ======================================================================
@@ -173,57 +227,31 @@ def cmd_pull(args: argparse.Namespace) -> None:
 
 
 def cmd_browser_open(args: argparse.Namespace) -> None:
-    """Open a URL in Chrome."""
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb)
+    """Open a URL in the target browser via intent (no CDP)."""
+    browser = Browser(_make_adb(args), browser=getattr(args, "browser", None) or "chrome")
     browser.open_url(args.url)
 
 
 def cmd_browser_cdp(args: argparse.Namespace) -> None:
     """Set up CDP and optionally navigate / run JS."""
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    if args.chrome_flags:
-        browser._extra_chrome_flags.extend(args.chrome_flags.split())
-    browser.enable_cdp()
-    browser.connect()
+    browser = _make_browser(args)
 
     if args.navigate:
         browser.navigate(args.navigate)
-
     if args.js:
-        result = browser.evaluate_js(args.js)
+        result = browser.evaluate_js(args.js, await_promise=True)
         console.print(json.dumps(result, indent=2, default=str))
-
     if args.title:
         console.print(f"Page title: {browser.get_page_title()}")
-
     if args.page_screenshot:
         browser.page_screenshot(args.page_screenshot)
-
     if args.interactive:
-        console.print("[bold]Interactive CDP REPL[/bold] — evaluate JavaScript in the page context.")
-        console.print("[dim]  Try: document.title, navigator.userAgent, document.querySelectorAll('a').length")
-        console.print("[dim]  Type 'quit' or Ctrl+C to exit.")
-        while True:
-            try:
-                expr = input("cdp> ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if expr.strip().lower() in ("quit", "exit"):
-                break
-            try:
-                result = browser.evaluate_js(expr)
-                console.print(json.dumps(result, indent=2, default=str))
-            except Exception as exc:  # noqa: BLE001
-                console.print(f"[red]{exc}")
-
+        _repl(browser, mode="js")
     if not (args.navigate or args.js or args.title or args.page_screenshot or args.interactive):
         console.print(
             f"[green]CDP ready on http://localhost:{args.port}/json\n"
             "Use --navigate, --js, --title, --page-screenshot, or --interactive."
         )
-
     browser.close()
 
 
@@ -310,14 +338,9 @@ def cmd_recon(args: argparse.Namespace) -> None:
     from harness_android.recon import full_recon, fingerprint_page, spider_page, extract_storage, analyze_csp
     from harness_android.recon import print_fingerprint, print_spider, print_storage, print_csp
 
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    browser.enable_cdp()
-    browser.connect()
-
+    browser = _make_browser(args)
     if args.url:
         browser.navigate(args.url)
-        import time; time.sleep(2)
 
     if args.full:
         full_recon(browser, output=args.output)
@@ -346,11 +369,7 @@ def cmd_recon(args: argparse.Namespace) -> None:
 def cmd_hooks(args: argparse.Namespace) -> None:
     from harness_android.hooks import Hooks
 
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    browser.enable_cdp()
-    browser.connect()
-
+    browser = _make_browser(args)
     hooks = Hooks(browser)
     hook_names = args.hooks.split(",") if args.hooks else ["all"]
     hooks.install(*hook_names)
@@ -360,12 +379,12 @@ def cmd_hooks(args: argparse.Namespace) -> None:
 
     if args.wait:
         console.print(f"[bold]Collecting for {args.wait}s …")
-        import time; time.sleep(args.wait)
+        time.sleep(args.wait)
     else:
         console.print("[bold]Hooks active. Press Ctrl+C to collect and exit.")
         try:
             while True:
-                import time; time.sleep(1)
+                time.sleep(1)
         except KeyboardInterrupt:
             pass
 
@@ -384,12 +403,8 @@ def cmd_hooks(args: argparse.Namespace) -> None:
 def cmd_pentest_run(args: argparse.Namespace) -> None:
     from harness_android.pentest import run_script
 
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    browser.enable_cdp()
-    browser.connect()
-
-    ctx = run_script(args.script, adb, browser)
+    browser = _make_browser(args)
+    ctx = run_script(args.script, browser.adb, browser)
 
     if args.report:
         ctx.report(path=args.report)
@@ -401,36 +416,29 @@ def cmd_mojo_trace(args: argparse.Namespace) -> None:
     """Capture Mojo IPC trace while triggering Web APIs."""
     from harness_android.mojo import MojoTracer
 
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    if args.verbose:
-        browser._extra_chrome_flags.append("--enable-logging")
-        browser._extra_chrome_flags.append("--vmodule=*mojo*=3")
-    browser.enable_cdp()
-    browser.connect()
-
+    extra = ["--enable-logging", "--vmodule=*mojo*=3"] if args.verbose else []
+    browser = _make_browser(args, extra_flags=extra)
     if args.url:
         browser.navigate(args.url)
-        import time; time.sleep(2)
 
     tracer = MojoTracer(browser, verbose=args.verbose)
     tracer.start_trace()
 
+    results = None
     if args.trigger:
         results = tracer.trigger_all_apis()
         tracer.print_trigger_results(results)
     else:
         duration = args.duration or 10
         console.print(f"[bold]Recording Mojo trace for {duration}s …")
-        import time; time.sleep(duration)
+        time.sleep(duration)
 
     events = tracer.stop_trace()
     messages = tracer.extract_mojo_messages(events)
     tracer.print_summary(messages)
 
     if args.output:
-        tracer.dump(args.output, events, messages,
-                    results if args.trigger else None)
+        tracer.dump(args.output, events, messages, results)
 
     if args.chrome_trace:
         tracer.dump_chrome_trace(args.chrome_trace)
@@ -442,14 +450,9 @@ def cmd_mojo_trigger(args: argparse.Namespace) -> None:
     """Trigger Mojo-backed Web APIs and show results."""
     from harness_android.mojo import MojoTracer
 
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    browser.enable_cdp()
-    browser.connect()
-
+    browser = _make_browser(args)
     if args.url:
         browser.navigate(args.url)
-        import time; time.sleep(2)
 
     tracer = MojoTracer(browser)
     results = tracer.trigger_all_apis()
@@ -465,14 +468,9 @@ def cmd_mojo_fuzz(args: argparse.Namespace) -> None:
     """Fuzz a Mojo-backed Web API with various inputs."""
     from harness_android.mojo import MojoTracer, MOJO_WEB_API_TRIGGERS
 
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
-    browser.enable_cdp()
-    browser.connect()
-
+    browser = _make_browser(args)
     if args.url:
         browser.navigate(args.url)
-        import time; time.sleep(2)
 
     tracer = MojoTracer(browser)
 
@@ -663,49 +661,23 @@ def cmd_webview_connect(args: argparse.Namespace) -> None:
     browser = connect_webview(adb, args.socket, local_port=args.port)
     console.print(f"[green]Connected to {args.socket} on localhost:{args.port}")
 
-    # Enable CDP domains so Runtime.evaluate etc. work reliably.
-    browser.enable_domains()
-
-    # Navigate FIRST — the initial page (e.g. chrome://newtab) may not
-    # have a functioning JS context.
     if args.navigate:
         browser.navigate(args.navigate)
-        import time; time.sleep(3)  # let the page load
 
-    # Now it's safe to query page info.
     try:
-        title = browser.get_page_title()
-        url = browser.get_page_url()
-        console.print(f"Page: {title} — {url}")
+        console.print(f"Page: {browser.get_page_title()} — {browser.get_page_url()}")
     except Exception:  # noqa: BLE001
         console.print("[dim]Could not read page title (page may still be loading)")
 
     if args.js:
-        result = browser.evaluate_js(args.js)
+        result = browser.evaluate_js(args.js, await_promise=True)
         console.print(json.dumps(result, indent=2, default=str))
-
     if args.title:
         console.print(f"Page title: {browser.get_page_title()}")
-
     if args.page_screenshot:
         browser.page_screenshot(args.page_screenshot)
-
     if args.interactive:
-        console.print("[bold]Interactive CDP REPL[/bold] — evaluate JavaScript in the page context.")
-        console.print("[dim]  Try: document.title, navigator.userAgent, document.querySelectorAll('a').length")
-        console.print("[dim]  Type 'quit' or Ctrl+C to exit.")
-        while True:
-            try:
-                expr = input("cdp> ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if expr.strip().lower() in ("quit", "exit"):
-                break
-            try:
-                result = browser.evaluate_js(expr)
-                console.print(json.dumps(result, indent=2, default=str))
-            except Exception as exc:  # noqa: BLE001
-                console.print(f"[red]{exc}")
+        _repl(browser, mode="js")
 
     browser.close()
 
@@ -716,21 +688,18 @@ def cmd_webview_connect(args: argparse.Namespace) -> None:
 
 
 def cmd_intent_enumerate(args: argparse.Namespace) -> None:
-    from harness_android.intents import IntentFuzzer
-    adb = ADB(serial=_find_serial(args))
-    fuzzer = IntentFuzzer(adb)
-    components = fuzzer.enumerate_exported(args.package)
-    fuzzer.print_components(components)
+    from harness_android.intents import enumerate_exported, print_components
+    print_components(enumerate_exported(_make_adb(args), args.package))
 
 
 def cmd_intent_fuzz(args: argparse.Namespace) -> None:
-    from harness_android.intents import IntentFuzzer
-    adb = ADB(serial=_find_serial(args))
-    fuzzer = IntentFuzzer(adb)
-    results = fuzzer.fuzz_package(args.package)
-    fuzzer.print_results(results)
+    from harness_android.intents import fuzz_package, print_fuzz_results
+    results = fuzz_package(_make_adb(args), args.package)
+    print_fuzz_results(results)
     if args.output:
-        fuzzer.dump_results(results, args.output)
+        with open(args.output, "w") as f:
+            json.dump([asdict(r) for r in results], f, indent=2, default=str)
+        console.print(f"[green]Results saved to {args.output}")
 
 
 # ======================================================================
@@ -779,11 +748,9 @@ def cmd_logcat_stream(args: argparse.Namespace) -> None:
 
 def cmd_logcat_capture(args: argparse.Namespace) -> None:
     """Capture logcat, save to file, auto-scan for crashes."""
-    import time
     from harness_android.logcat import LogcatCapture
-    adb = ADB(serial=_find_serial(args))
-    logcat = LogcatCapture(adb)
-    logcat.start()
+    logcat = LogcatCapture(_make_adb(args))
+    logcat.start(output=args.output)
     duration = args.duration
     if duration > 0:
         console.print(f"[bold]Capturing logcat for {duration}s …")
@@ -798,7 +765,7 @@ def cmd_logcat_capture(args: argparse.Namespace) -> None:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
-    path = logcat.stop(args.output)
+    path = logcat.stop()
     console.print(f"[green]Logcat saved to {path}")
     crashes = logcat.find_crashes(str(path))
     if crashes:
@@ -865,7 +832,6 @@ def cmd_ui_monkey(args: argparse.Namespace) -> None:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    import time
     from harness_android.fileserver import FileServer
     server = FileServer(args.directory, port=args.port)
     server.start()
@@ -879,59 +845,37 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 
 def cmd_mojo_enable(args: argparse.Namespace) -> None:
-    """Restart Chrome with MojoJS bindings enabled and optionally serve gen/."""
-    adb = ADB(serial=_find_serial(args))
-    browser = Browser(adb, local_port=args.port)
+    """Restart the browser with MojoJS enabled; optionally serve gen/ and fuzz."""
+    from harness_android.mojo import enable_mojojs, MojoJS
 
-    mojo_flags = [
-        "--enable-blink-features=MojoJS,MojoJSTest",
-    ]
-    if args.chrome_flags:
-        mojo_flags.extend(args.chrome_flags.split())
-
-    browser._extra_chrome_flags.extend(mojo_flags)
-    browser.enable_cdp()
-    browser.connect()
-    browser.enable_domains()
-
-    console.print("[green bold]MojoJS bindings enabled!")
-    console.print("[dim]Chrome restarted with: " + " ".join(mojo_flags))
-    console.print("[dim]JS can now use Mojo.bindInterface() in the page context.")
-
-    server = None
-    if args.gen_dir:
-        from harness_android.fileserver import FileServer
-        server = FileServer(args.gen_dir, port=args.serve_port)
-        server.start()
-        console.print(
-            f"[bold]gen/ served at {server.emulator_url}\n"
-            f"  Navigate to {server.emulator_url}/your_test.html"
-        )
+    adb = _make_adb(args)
+    extra = args.chrome_flags.split() if getattr(args, "chrome_flags", None) else []
+    browser = Browser(
+        adb,
+        local_port=args.port,
+        browser=getattr(args, "browser", None) or "chrome",
+        extra_flags=extra,
+    )
+    server = enable_mojojs(
+        browser,
+        gen_dir=args.gen_dir,
+        serve_port=getattr(args, "serve_port", 8089),
+    )
 
     if args.navigate:
         browser.navigate(args.navigate)
 
-    if args.interactive:
-        console.print("[bold]Mojo JS REPL[/bold] — evaluate JavaScript (MojoJS bindings enabled).")
-        console.print("[dim]  Try: typeof Mojo, Mojo.bindInterface, navigator.userAgent")
-        console.print("[dim]  Type 'quit' or Ctrl+C to exit.")
-        while True:
-            try:
-                expr = input("mojo> ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if expr.strip().lower() in ("quit", "exit"):
-                break
-            try:
-                result = browser.evaluate_js(expr)
-                console.print(json.dumps(result, indent=2, default=str))
-            except Exception as exc:  # noqa: BLE001
-                console.print(f"[red]{exc}")
-    elif not args.navigate:
+    if getattr(args, "fuzz", None):
+        mojo = MojoJS(browser)
+        results = mojo.fuzz_interface(args.fuzz, MojoJS.default_payloads())
+        crashes = [r for r in results if r.crashed]
         console.print(
-            "[yellow]Tip: use --navigate URL or --interactive, "
-            "or open a URL via 'browser cdp --navigate' in another terminal."
+            f"\n[bold]{len(results)} payloads, [red]{len(crashes)} crash(es)"
         )
+
+    if args.interactive:
+        console.print("[dim]Try: typeof Mojo, Mojo.createMessagePipe()")
+        _repl(browser, mode="js")
 
     if server:
         server.stop()
@@ -950,6 +894,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-s", "--serial", default=None, help="ADB device serial (default: auto)"
+    )
+    parser.add_argument(
+        "-b", "--browser", default=None,
+        choices=["chrome", "chromium", "edge"],
+        help="Target browser (default: chrome)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1156,6 +1105,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chrome-flags", help='Space-separated Chrome flags (e.g. "--flag1 --flag2")')
     p.add_argument("--navigate", "-n", help="Navigate to URL after enabling")
     p.add_argument("--interactive", "-i", action="store_true", help="Enter Mojo JS REPL")
+    p.add_argument("--fuzz", metavar="INTERFACE",
+                   help="Fuzz a mojom interface with raw IPC payloads "
+                        "(e.g. blink.mojom.ClipboardHost)")
     p.set_defaults(func=cmd_mojo_enable)
 
     # ---- serve ----

@@ -13,7 +13,6 @@ from rich.console import Console
 from rich.table import Table
 
 from harness_android.adb import ADB
-from harness_android.config import get_adb
 
 console = Console()
 
@@ -92,6 +91,16 @@ _CRASH_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     # Security exceptions
     ("security", "medium", re.compile(
         r"java\.lang\.SecurityException:\s*(.+)")),
+    # Mojo / IPC validation kills the renderer (browser-side)
+    ("mojo_bad_msg", "high", re.compile(
+        r"Terminating renderer for bad (?:IPC|Mojo) message", re.IGNORECASE)),
+    ("mojo_bad_msg", "high", re.compile(
+        r"\[mojo\].*Validation failed for\s+(\S+)", re.IGNORECASE)),
+    ("mojo_bad_msg", "high", re.compile(
+        r"bad_message[_:].*reason\s*[=:]?\s*(.+)", re.IGNORECASE)),
+    # Chromium FATAL log lines
+    ("chromium_fatal", "critical", re.compile(
+        r"\[FATAL:[^\]]+\]\s*(.+)")),
 ]
 
 
@@ -102,6 +111,7 @@ class LogcatCapture:
         self.adb = adb
         self._process: Optional[subprocess.Popen] = None
         self._output_path: Optional[Path] = None
+        self._file = None
 
     def start(
         self,
@@ -109,29 +119,22 @@ class LogcatCapture:
         filter_tag: str | None = None,
         clear_first: bool = True,
     ) -> Path:
-        """Start capturing logcat in the background.
-
-        Parameters
-        ----------
-        output : path for the logcat output file
-        filter_tag : optional tag filter (e.g. "chromium", "ActivityManager")
-        clear_first : clear logcat buffer before starting
-        """
+        """Start capturing logcat in the background."""
         if clear_first:
             self.adb.run("logcat", "-c", check=False, timeout=5)
 
         self._output_path = Path(output)
-        cmd = [str(get_adb())]
-        if self.adb.serial:
-            cmd += ["-s", self.adb.serial]
-        cmd += ["logcat", "-v", "threadtime"]
+        args = ["logcat", "-v", "threadtime"]
         if filter_tag:
-            cmd += ["-s", filter_tag]
+            args += ["-s", filter_tag]
 
-        self._file = open(self._output_path, "w")
-        self._process = subprocess.Popen(
-            cmd, stdout=self._file, stderr=subprocess.DEVNULL,
-        )
+        f = open(self._output_path, "w", encoding="utf-8", errors="replace")
+        try:
+            self._process = self.adb.popen(*args, stdout=f, stderr=subprocess.STDOUT)
+        except Exception:
+            f.close()
+            raise
+        self._file = f
         console.print(f"[green]Logcat capture started → {self._output_path}")
         return self._output_path
 
@@ -143,9 +146,12 @@ class LogcatCapture:
                 self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait()
             self._process = None
-        if hasattr(self, "_file"):
+        if self._file:
+            self._file.flush()
             self._file.close()
+            self._file = None
         console.print(f"[yellow]Logcat capture stopped → {self._output_path}")
         return self._output_path or Path("logcat.txt")
 

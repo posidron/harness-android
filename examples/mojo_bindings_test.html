@@ -12,11 +12,21 @@
 
        harness-android mojo enable \
          --gen-dir /path/to/chromium/out/Release \
-         --navigate "http://10.0.2.2:8089/examples/mojo_bindings_test.html" \
+         --navigate "http://127.0.0.1:8089/examples/mojo_bindings_test.html" \
          --interactive
+
+       (the harness sets up `adb reverse` so 127.0.0.1:8089 on-device reaches
+       the host file server)
 
     4. Watch logcat for crashes:
        harness-android logcat capture --duration 60 -o mojo_fuzz.log
+
+  Alternative — drive fuzzing entirely from the harness (no HTML needed):
+
+       harness-android mojo enable --fuzz blink.mojom.ClipboardHost
+
+  This uses the MojoJS class to bind the interface and write raw payloads
+  over CDP, with automatic renderer-crash detection and reconnect.
 
   Requirements:
     - A debuggable Chromium build (install-chromium or custom build)
@@ -54,6 +64,8 @@
       logEl.appendChild(line);
       console.log(msg);
     }
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     async function runTests() {
       // ── Step 1: Check Mojo availability ──
@@ -144,6 +156,9 @@
             writer.close();
             break;
           }
+          // Give the receiver a chance to dispatch before tearing the pipe
+          // down, otherwise the message may be dropped on close.
+          await sleep(50);
           writer.close();
         } catch (e) {
           log(`  Payload #${i} error: ${e.message}`, 'fail');
