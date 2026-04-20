@@ -108,8 +108,9 @@ def load_config() -> dict:
                 with open(p) as f:
                     user = _json.load(f)
                 config = _deep_merge(config, user)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                import sys
+                print(f"[harness] warning: ignoring {p}: {exc}", file=sys.stderr)
 
     return config
 

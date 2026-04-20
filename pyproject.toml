@@ -16,6 +16,13 @@ Pillow = "^10.2"
 [tool.poetry.scripts]
 harness-android = "harness_android.cli:main"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
