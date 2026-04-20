@@ -7,10 +7,16 @@ from harness_android.browser import Browser, BROWSERS, BrowserSpec
 
 
 def test_browser_presets():
-    assert set(BROWSERS) >= {"chrome", "chromium", "edge"}
+    assert set(BROWSERS) >= {"chrome", "chromium", "edge", "edge-canary", "edge-dev"}
     edge = BROWSERS["edge"]
     assert edge.package == "com.microsoft.emmx"
     assert "devtools_remote" in edge.devtools_socket
+    canary = BROWSERS["edge-canary"]
+    assert canary.package == "com.microsoft.emmx.canary"
+    assert "devtools_remote" in canary.devtools_socket
+    dev = BROWSERS["edge-dev"]
+    assert dev.package == "com.microsoft.emmx.dev"
+    assert "devtools_remote" in dev.devtools_socket
     chrome = BROWSERS["chrome"]
     assert chrome.package == "com.android.chrome"
     chromium = BROWSERS["chromium"]

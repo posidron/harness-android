@@ -209,9 +209,9 @@ def get_cmdline_tools_url() -> str:
     return _CMDLINE_TOOLS_URLS[PLATFORM]
 
 
-def get_system_image_package(api: int = DEFAULT_API_LEVEL) -> str:
-    """Return the sdkmanager package string for a Google-APIs x86_64 image."""
-    abi = "x86_64"
+def get_system_image_package(api: int = DEFAULT_API_LEVEL, arch: str = "x86_64") -> str:
+    """Return the sdkmanager package string for a Google-APIs system image."""
+    abi = {"x86_64": "x86_64", "arm64": "arm64-v8a"}.get(arch, arch)
     return f"system-images;android-{api};google_apis;{abi}"
 
 

@@ -48,9 +48,11 @@ class Emulator:
         self,
         avd_name: str = DEFAULT_AVD_NAME,
         api_level: int = DEFAULT_API_LEVEL,
+        arch: str = "x86_64",
     ):
         self.avd_name = avd_name
         self.api_level = api_level
+        self.arch = arch
         self._process: Optional[subprocess.Popen] = None
         self._serial: Optional[str] = None
 
@@ -76,7 +78,7 @@ class Emulator:
             str(avdmanager),
             "create", "avd",
             "--name", self.avd_name,
-            "--package", get_system_image_package(self.api_level),
+            "--package", get_system_image_package(self.api_level, self.arch),
             "--device", device_profile,
             "--path", str(avd_root / self.avd_name),
         ]
@@ -128,6 +130,22 @@ class Emulator:
         if not emulator.exists():
             raise FileNotFoundError(
                 "Emulator binary not found. Run `harness-android setup` first."
+            )
+
+        # Detect cross-architecture emulation (e.g. ARM64 guest on x86_64 host).
+        import platform as _platform
+        host_arch = _platform.machine().lower()  # e.g. 'amd64', 'x86_64'
+        guest_is_arm = self.arch.startswith("arm")
+        host_is_x86 = host_arch in ("x86_64", "amd64", "x86")
+        if guest_is_arm and host_is_x86:
+            raise RuntimeError(
+                "The Android emulator does not support ARM64 guests on x86_64 hosts.\n"
+                "ARM APKs typically run on x86_64 emulators via built-in binary\n"
+                "translation (API 30+). If a specific APK crashes through translation,\n"
+                "use a physical ARM64 device over USB instead:\n"
+                "    harness-android -s <serial> install app.apk\n"
+                "\n"
+                "The --arch arm64 option is for ARM64 hosts (e.g. Apple Silicon Macs)."
             )
 
         cmd = [

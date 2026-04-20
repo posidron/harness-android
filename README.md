@@ -69,8 +69,9 @@ harness-android [-s SERIAL] <command> [options]
 Download SDK, accept licences, install platform-tools, emulator, system image.
 
 ```bash
-harness-android setup              # defaults to API 35 (Android 15)
+harness-android setup              # defaults to API 35 (Android 15), x86_64
 harness-android setup --api 34     # use Android 14 instead
+harness-android setup --arch arm64 # ARM64 system image (for Apple Silicon Macs)
 ```
 
 #### `create` / `delete`
@@ -79,6 +80,7 @@ Create or delete an AVD (Android Virtual Device).
 ```bash
 harness-android create
 harness-android create --name my_phone --api 35 --device pixel_7 --force
+harness-android create --name arm_phone --arch arm64   # ARM64 AVD (Apple Silicon Macs)
 harness-android delete --name my_phone
 ```
 
@@ -92,6 +94,7 @@ harness-android start --gpu host --ram 4096
 harness-android start --wipe               # fresh data
 harness-android start --cold-boot          # skip snapshot, full boot
 harness-android start --no-snapshot-save   # don't save snapshot on exit
+harness-android start --name arm_phone --arch arm64  # boot ARM64 AVD (Apple Silicon only)
 ```
 
 #### `stop`

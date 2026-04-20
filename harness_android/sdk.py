@@ -175,13 +175,13 @@ def accept_licenses() -> None:
     _run_sdkmanager("--licenses")
 
 
-def install_packages(api_level: int) -> None:
+def install_packages(api_level: int, arch: str = "x86_64") -> None:
     """Install platform-tools, emulator, platform, and system image."""
     packages = [
         "platform-tools",
         "emulator",
         f"platforms;android-{api_level}",
-        get_system_image_package(api_level),
+        get_system_image_package(api_level, arch),
     ]
     console.print(f"[bold]Installing SDK packages: {', '.join(packages)}")
     result = _run_sdkmanager(*packages)
@@ -191,12 +191,12 @@ def install_packages(api_level: int) -> None:
     console.print("[green]All SDK packages installed.")
 
 
-def full_setup(api_level: int) -> Path:
+def full_setup(api_level: int, arch: str = "x86_64") -> Path:
     """Bootstrap JDK + SDK, accept licences, install packages. Returns SDK root."""
     bootstrap_jdk()
     sdk_root = bootstrap_sdk()
     accept_licenses()
-    install_packages(api_level)
+    install_packages(api_level, arch)
     return sdk_root
 
 

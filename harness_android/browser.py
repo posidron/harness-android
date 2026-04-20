@@ -80,6 +80,28 @@ BROWSERS: dict[str, BrowserSpec] = {
             "/data/local/tmp/chrome-command-line",
         ),
     ),
+    "edge-canary": BrowserSpec(
+        name="edge-canary",
+        package="com.microsoft.emmx.canary",
+        activity="com.microsoft.ruby.Main",
+        devtools_socket="com.microsoft.emmx.canary_devtools_remote",
+        cmdline_files=(
+            "/data/local/tmp/microsoft-edge-canary-command-line",
+            "/data/local/tmp/com.microsoft.emmx.canary-command-line",
+            "/data/local/tmp/chrome-command-line",
+        ),
+    ),
+    "edge-dev": BrowserSpec(
+        name="edge-dev",
+        package="com.microsoft.emmx.dev",
+        activity="com.microsoft.ruby.Main",
+        devtools_socket="com.microsoft.emmx.dev_devtools_remote",
+        cmdline_files=(
+            "/data/local/tmp/microsoft-edge-dev-command-line",
+            "/data/local/tmp/com.microsoft.emmx.dev-command-line",
+            "/data/local/tmp/chrome-command-line",
+        ),
+    ),
 }
 
 

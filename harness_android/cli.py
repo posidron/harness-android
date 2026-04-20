@@ -94,7 +94,7 @@ def _repl(browser: Browser, *, mode: str = "cdp") -> None:
 
 def cmd_setup(args: argparse.Namespace) -> None:
     """Download the Android SDK, accept licences, install packages."""
-    full_setup(args.api)
+    full_setup(args.api, args.arch)
     if args.install_chromium:
         from harness_android.sdk import install_chromium
         install_chromium()
@@ -109,7 +109,7 @@ def cmd_install_chromium(args: argparse.Namespace) -> None:
 
 def cmd_create(args: argparse.Namespace) -> None:
     """Create an AVD."""
-    emu = Emulator(avd_name=args.name, api_level=args.api)
+    emu = Emulator(avd_name=args.name, api_level=args.api, arch=args.arch)
     emu.create_avd(device_profile=args.device, force=args.force)
 
 
@@ -131,7 +131,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     gpu = args.gpu if args.gpu != "auto" else cfg.get("gpu", "auto")
     headless = args.headless or cfg.get("headless", False)
 
-    emu = Emulator(avd_name=name, api_level=api)
+    emu = Emulator(avd_name=name, api_level=api, arch=getattr(args, 'arch', 'x86_64'))
     if not emu.avd_exists():
         console.print(f"[yellow]AVD '{name}' not found, creating …")
         emu.create_avd(force=True)
@@ -897,7 +897,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-b", "--browser", default=None,
-        choices=["chrome", "chromium", "edge"],
+        choices=["chrome", "chromium", "edge", "edge-canary", "edge-dev"],
         help="Target browser (default: chrome)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -905,6 +905,8 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- setup ----
     p = sub.add_parser("setup", help="Download SDK and system images")
     p.add_argument("--api", type=int, default=DEFAULT_API_LEVEL, help="API level")
+    p.add_argument("--arch", default="x86_64", choices=["x86_64", "arm64"],
+                    help="System image architecture (default: x86_64)")
     p.add_argument("--install-chromium", action="store_true",
                     help="Also install Chromium (debuggable) for CDP on API 35+")
     p.set_defaults(func=cmd_setup)
@@ -917,6 +919,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("create", help="Create an AVD")
     p.add_argument("--name", default=DEFAULT_AVD_NAME, help="AVD name")
     p.add_argument("--api", type=int, default=DEFAULT_API_LEVEL)
+    p.add_argument("--arch", default="x86_64", choices=["x86_64", "arm64"],
+                    help="System image architecture (default: x86_64)")
     p.add_argument("--device", default="pixel_7", help="Device profile")
     p.add_argument("--force", action="store_true", help="Overwrite existing AVD")
     p.set_defaults(func=cmd_create)
@@ -930,6 +934,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("start", help="Boot the emulator")
     p.add_argument("--name", default=DEFAULT_AVD_NAME)
     p.add_argument("--api", type=int, default=DEFAULT_API_LEVEL)
+    p.add_argument("--arch", default="x86_64", choices=["x86_64", "arm64"],
+                    help="System image architecture (default: x86_64)")
     p.add_argument("--headless", action="store_true", help="No GUI window")
     p.add_argument("--gpu", default="auto", help="GPU mode (auto|host|swiftshader_indirect|off)")
     p.add_argument("--ram", type=int, default=4096, help="RAM in MB (default: 4096)")
