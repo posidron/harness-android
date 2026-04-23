@@ -6,13 +6,13 @@ import re
 from dataclasses import dataclass, field
 
 import requests
-from rich.console import Console
 from rich.table import Table
+
+from harness_android.console import console
 
 from harness_android.adb import ADB, poll_until
 from harness_android.browser import Browser
 
-console = Console()
 
 _SOCKET_RE = re.compile(
     r"((?:webview_devtools_remote|chrome_devtools_remote|\S+_devtools_remote)(?:_(\d+))?)$"
@@ -28,8 +28,16 @@ class WebViewTarget:
     local_port: int = 0
 
 
-def enumerate_webviews(adb: ADB) -> list[WebViewTarget]:
-    """Find all debuggable DevTools sockets on the device."""
+def enumerate_webviews(adb: ADB, default_chrome_package: str = "") -> list[WebViewTarget]:
+    """Find all debuggable DevTools sockets on the device.
+
+    *default_chrome_package* is used as the package hint for a
+    ``chrome_devtools_remote`` socket when the kernel does not expose a
+    PID (older ``/proc/net/unix`` rows show inode 0).  Pass the package
+    of the browser preset you're driving (``com.microsoft.emmx.local``,
+    ``com.android.chrome``, …) so the reported package matches reality
+    instead of always claiming stable Chrome.
+    """
     targets: list[WebViewTarget] = []
     seen: set[str] = set()
     for sock in adb.list_abstract_sockets("devtools_remote"):
@@ -45,8 +53,11 @@ def enumerate_webviews(adb: ADB) -> list[WebViewTarget]:
                 check=False, timeout=5,
             ).stdout
             t.package = cmdline.split("\x00", 1)[0].strip()
-        elif "chrome" in sock:
-            t.package = "com.android.chrome"
+        elif sock == "chrome_devtools_remote":
+            # No PID in /proc/net/unix row. Fall back to the caller-
+            # supplied hint (often the active browser preset) rather
+            # than hard-coding stable Chrome.
+            t.package = default_chrome_package
         targets.append(t)
     console.print(f"[green]Found {len(targets)} debuggable DevTools socket(s)")
     return targets
@@ -71,8 +82,12 @@ def forward_and_query(adb: ADB, target: WebViewTarget, local_port: int) -> WebVi
     return target
 
 
-def list_all_webviews(adb: ADB, base_port: int = 9300) -> list[WebViewTarget]:
-    targets = enumerate_webviews(adb)
+def list_all_webviews(
+    adb: ADB,
+    base_port: int = 9300,
+    default_chrome_package: str = "",
+) -> list[WebViewTarget]:
+    targets = enumerate_webviews(adb, default_chrome_package=default_chrome_package)
     for i, t in enumerate(targets):
         forward_and_query(adb, t, local_port=base_port + i)
     return targets
