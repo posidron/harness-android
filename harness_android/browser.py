@@ -26,12 +26,10 @@ from typing import Any, Callable, Deque, Optional
 
 import requests
 import websocket
-from rich.console import Console
 
 from harness_android.adb import ADB, poll_until
 from harness_android.config import CDP_LOCAL_PORT
-
-console = Console()
+from harness_android.console import console
 
 
 # ----------------------------------------------------------------------
@@ -45,6 +43,12 @@ class BrowserSpec:
     activity: str
     devtools_socket: str
     cmdline_files: tuple[str, ...]
+    #: Flags added to every cmdline write, *before* any user-supplied
+    #: ``extra_flags`` / ``chrome_flags``.  Use this to flip features
+    #: that are only honoured on debuggable builds (e.g. MojoJS).
+    #: Release Chrome silently ignores unknown flags, so leaving these
+    #: on for non-debuggable presets is a no-op.
+    default_flags: tuple[str, ...] = ()
 
 
 BROWSERS: dict[str, BrowserSpec] = {
@@ -72,35 +76,56 @@ BROWSERS: dict[str, BrowserSpec] = {
         name="edge",
         package="com.microsoft.emmx",
         activity="com.microsoft.ruby.Main",
-        # Edge appends the PID; matched by prefix in _wait_for_devtools_socket.
-        devtools_socket="com.microsoft.emmx_devtools_remote",
+        devtools_socket="chrome_devtools_remote",
         cmdline_files=(
             "/data/local/tmp/microsoft-edge-command-line",
             "/data/local/tmp/com.microsoft.emmx-command-line",
             "/data/local/tmp/chrome-command-line",
         ),
+        # MojoJS on every edge-* preset. Release Edge (non-debuggable)
+        # silently ignores the flag, so it's a no-op there; on
+        # debuggable builds it exposes Mojo.bindInterface + MojoJSTest.
+        default_flags=("--enable-blink-features=MojoJS,MojoJSTest",),
     ),
     "edge-canary": BrowserSpec(
         name="edge-canary",
         package="com.microsoft.emmx.canary",
         activity="com.microsoft.ruby.Main",
-        devtools_socket="com.microsoft.emmx.canary_devtools_remote",
+        devtools_socket="chrome_devtools_remote",
         cmdline_files=(
             "/data/local/tmp/microsoft-edge-canary-command-line",
             "/data/local/tmp/com.microsoft.emmx.canary-command-line",
             "/data/local/tmp/chrome-command-line",
         ),
+        default_flags=("--enable-blink-features=MojoJS,MojoJSTest",),
     ),
     "edge-dev": BrowserSpec(
         name="edge-dev",
         package="com.microsoft.emmx.dev",
         activity="com.microsoft.ruby.Main",
-        devtools_socket="com.microsoft.emmx.dev_devtools_remote",
+        devtools_socket="chrome_devtools_remote",
         cmdline_files=(
             "/data/local/tmp/microsoft-edge-dev-command-line",
             "/data/local/tmp/com.microsoft.emmx.dev-command-line",
             "/data/local/tmp/chrome-command-line",
         ),
+        default_flags=("--enable-blink-features=MojoJS,MojoJSTest",),
+    ),
+    "edge-local": BrowserSpec(
+        name="edge-local",
+        package="com.microsoft.emmx.local",
+        activity="com.microsoft.ruby.Main",
+        devtools_socket="chrome_devtools_remote",
+        cmdline_files=(
+            "/data/local/tmp/microsoft-edge-local-command-line",
+            "/data/local/tmp/com.microsoft.emmx.local-command-line",
+            "/data/local/tmp/chrome-command-line",
+        ),
+        # edge-local is our primary pentest build (debuggable). Enable
+        # MojoJS by default so `Mojo.bindInterface` + MojoJSTest test
+        # APIs are reachable from every page, including privileged
+        # edge:// pages, without having to pass --chrome-flags every run.
+        default_flags=("--enable-blink-features=MojoJS,MojoJSTest",),
     ),
 }
 
@@ -133,6 +158,50 @@ def resolve_browser(name_or_pkg: str | None) -> BrowserSpec:
 
 class TargetCrashed(RuntimeError):
     """Raised when the inspected target reports ``Inspector.targetCrashed``."""
+
+
+class CDPError(RuntimeError):
+    """Structured error for a non-zero CDP response.
+
+    ``code`` / ``message`` come from the remote-protocol error object so
+    callers can match on ``-32000`` etc. without regex-parsing the message.
+    """
+
+    def __init__(self, method: str, error: dict):
+        self.method = method
+        self.code = error.get("code")
+        self.message = error.get("message", "")
+        self.data = error.get("data")
+        super().__init__(f"CDP {method}: {error}")
+
+
+def _preview_remote_object(ro: dict) -> Any:
+    """Render a CDP ``Runtime.RemoteObject`` into something JSON-printable.
+
+    Used when a caller asks for a value that can't be deep-cloned
+    (``window``, DOM nodes, bridge objects, ...). We surface ``type``,
+    ``className``, and the ``preview`` (properties list) so the REPL
+    still produces useful output.
+    """
+    if not ro:
+        return None
+    out: dict[str, Any] = {"__cdp_type": ro.get("type")}
+    if "subtype" in ro:
+        out["__cdp_subtype"] = ro["subtype"]
+    if "className" in ro:
+        out["__cdp_class"] = ro["className"]
+    if "description" in ro:
+        out["__cdp_desc"] = ro["description"]
+    preview = ro.get("preview") or {}
+    props = preview.get("properties") or []
+    if props:
+        out["__cdp_properties"] = {
+            p.get("name"): p.get("value") if "value" in p else f"<{p.get('type')}>"
+            for p in props
+        }
+        if preview.get("overflow"):
+            out["__cdp_truncated"] = True
+    return out
 
 
 @dataclass
@@ -206,7 +275,7 @@ class _CDPSession:
             if "id" in msg:
                 if msg["id"] == req_id:
                     if "error" in msg:
-                        raise RuntimeError(f"CDP {method}: {msg['error']}")
+                        raise CDPError(method, msg["error"])
                     return msg.get("result", {})
                 # Response to an earlier command we already gave up on; drop.
                 continue
@@ -336,6 +405,7 @@ class Browser:
             "--no-first-run",
             "--remote-debugging-port=0",
             "--remote-allow-origins=*",
+            *self.spec.default_flags,
             *self._extra_chrome_flags,
         ])
         for dest in self.spec.cmdline_files:
@@ -359,8 +429,43 @@ class Browser:
         return poll_until(_find, timeout=timeout, interval=0.5,
                           desc=f"DevTools socket '{prefix}'")
 
-    def enable_cdp(self, timeout: float = 60) -> None:
-        """Start the browser with remote debugging and forward the socket."""
+    def prepare_cdp(self) -> None:
+        """Write CDP command-line flags without restarting the browser.
+
+        Call this *before* launching the browser (or after install) so the
+        next natural launch picks up the debug flags.  The browser keeps
+        its current state — NTP, mini apps, etc. are not disrupted.
+
+        Follow up with :meth:`attach_cdp` once the browser is running.
+        """
+        self._write_chrome_flags()
+
+    def attach_cdp(self, timeout: float = 60) -> None:
+        """Connect to an already-running browser's DevTools socket.
+
+        Unlike :meth:`enable_cdp`, this does **not** restart the browser.
+        Use after :meth:`prepare_cdp` + a natural launch, or when the
+        browser is already running with debug flags.
+        """
+        socket_name = self._wait_for_devtools_socket(timeout=timeout / 2)
+        self.adb.forward(self.local_port, f"localabstract:{socket_name}")
+
+        poll_until(
+            lambda: requests.get(
+                f"http://127.0.0.1:{self.local_port}/json/version", timeout=3
+            ).status_code == 200,
+            timeout=timeout / 2,
+            interval=0.5,
+            desc="CDP /json/version",
+        )
+        console.print(f"[green]CDP attached — http://127.0.0.1:{self.local_port}")
+
+    def enable_cdp(self, timeout: float = 60, url: str = "about:blank") -> None:
+        """Start the browser with remote debugging and forward the socket.
+
+        *url*: initial URL to open. Use ``None`` to let the browser open its
+        default page (e.g. the native NTP in Edge).
+        """
         if not self.adb.is_installed(self.spec.package):
             raise RuntimeError(
                 f"{self.spec.package} is not installed on the device. "
@@ -370,11 +475,13 @@ class Browser:
         self._write_chrome_flags()
         self.force_stop()
         # `-W` blocks until the activity reports launched — no fixed sleep.
-        self.adb.shell(
+        cmd = [
             "am", "start", "-W",
             "-n", f"{self.spec.package}/{self.spec.activity}",
-            "-d", "about:blank",
-        )
+        ]
+        if url:
+            cmd.extend(["-d", url])
+        self.adb.shell(*cmd)
 
         socket_name = self._wait_for_devtools_socket(timeout=timeout / 2)
         self.adb.forward(self.local_port, f"localabstract:{socket_name}")
@@ -405,13 +512,41 @@ class Browser:
     def list_targets(self) -> list[dict]:
         return self._http("/json/list")
 
+    def find_target(
+        self,
+        *,
+        url_substring: str | None = None,
+        target_id: str | None = None,
+    ) -> str | None:
+        """Look up a CDP page target by exact id or URL substring.
+
+        Returns the target id, or ``None`` if nothing matches. Pass no args
+        to have :meth:`connect` fall back to its default page selection.
+        """
+        if target_id:
+            for t in self.list_targets():
+                if t.get("id") == target_id:
+                    return t.get("id")
+            return None
+        if url_substring:
+            for t in self.list_targets():
+                if t.get("type") == "page" and url_substring in (t.get("url") or ""):
+                    return t.get("id")
+            return None
+        return None
+
     def _ensure_page_target(self) -> dict:
         """Return a page target, creating one via /json/new if none exists."""
         def _find() -> dict | None:
-            for t in self.list_targets():
-                if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+            targets = [
+                t for t in self.list_targets()
+                if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
+            ]
+            # Prefer targets with a real URL over empty/unresponsive ones.
+            for t in targets:
+                if t.get("url"):
                     return t
-            return None
+            return targets[0] if targets else None
 
         page = _find()
         if page:
@@ -549,20 +684,85 @@ class Browser:
         *,
         await_promise: bool = False,
         timeout: float | None = None,
+        return_by_value: bool = True,
     ) -> Any:
-        result = self.send(
-            "Runtime.evaluate",
-            {
-                "expression": expression,
-                "returnByValue": True,
-                "awaitPromise": await_promise,
-            },
-            timeout=timeout,
-        )
+        """Evaluate *expression* in the page context.
+
+        With ``return_by_value=True`` (default) Chrome deep-clones the result
+        to JSON. For values that contain circular references (``window``,
+        ``document``, DOM nodes, many frameworks' bridge objects) Chrome
+        responds with ``-32000 "Object reference chain is too long"``. We
+        catch that, fall back to ``returnByValue=False``, and return a
+        structured preview dict — so the REPL never blows up on things like
+        ``window``, ``document.body``, or ``sapphireWebViewBridge``.
+        """
+        try:
+            result = self.send(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": return_by_value,
+                    "awaitPromise": await_promise,
+                    "generatePreview": not return_by_value,
+                },
+                timeout=timeout,
+            )
+        except CDPError as exc:
+            # -32000 "Object reference chain is too long" — fall back.
+            if return_by_value and exc.code == -32000 and "reference chain" in (exc.message or ""):
+                return self.evaluate_js(
+                    expression,
+                    await_promise=await_promise,
+                    timeout=timeout,
+                    return_by_value=False,
+                )
+            raise
         if exc := result.get("exceptionDetails"):
             desc = exc.get("exception", {}).get("description") or exc.get("text")
             raise RuntimeError(f"JS exception: {desc}")
-        return result.get("result", {}).get("value")
+        ro = result.get("result", {})
+        if return_by_value:
+            val = ro.get("value")
+            # With returnByValue=True, DOM nodes / Window / Date / Map / etc.
+            # serialize to ``{}`` indistinguishably from a literal ``{}``. If
+            # we see that, re-issue by-ref + preview; real ``{}`` still comes
+            # back as ``{}`` and non-trivial objects get a useful preview.
+            if ro.get("type") == "object" and val in ({}, []):
+                return self.evaluate_js(
+                    expression,
+                    await_promise=await_promise,
+                    timeout=timeout,
+                    return_by_value=False,
+                )
+            return val
+        # By-ref: surface a readable preview instead of a RemoteObject handle.
+        return _preview_remote_object(ro)
+
+    def wait_for_expression(
+        self,
+        expression: str,
+        *,
+        timeout: float = 10.0,
+        interval: float = 0.2,
+    ) -> Any:
+        """Poll ``expression`` until it is truthy or *timeout* elapses.
+
+        Use this to defeat races where a page-injected global
+        (``sapphireWebViewBridge``, ``__NEXT_DATA__``, frameworks, etc.)
+        appears *after* ``Page.loadEventFired``. Returns the first truthy
+        value; raises :class:`TimeoutError` otherwise.
+        """
+        deadline = time.monotonic() + timeout
+        last: Any = None
+        while time.monotonic() < deadline:
+            try:
+                last = self.evaluate_js(expression)
+            except RuntimeError:
+                last = None
+            if last:
+                return last
+            time.sleep(interval)
+        raise TimeoutError(f"wait_for_expression({expression!r}) timed out after {timeout}s")
 
     # ------------------------------------------------------------------
     # Permissions (browser target)

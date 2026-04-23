@@ -4,6 +4,85 @@ Cross-platform Android emulator harness and **mobile browser penetration testing
 
 Under the hood it uses the official **Android Emulator** (QEMU-based) and **ADB**, managed automatically so you never have to touch `sdkmanager` by hand. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
+- [harness-android](#harness-android)
+  - [Quick-start](#quick-start)
+  - [Prerequisites](#prerequisites)
+  - [CLI reference](#cli-reference)
+    - [Global options](#global-options)
+    - [Emulator management](#emulator-management)
+      - [`setup`](#setup)
+      - [`create` / `delete`](#create--delete)
+      - [`start`](#start)
+      - [`stop`](#stop)
+      - [`status`](#status)
+      - [`install-chromium`](#install-chromium)
+    - [Device control](#device-control)
+      - [`shell`](#shell)
+      - [`install`](#install)
+      - [`screenshot`](#screenshot)
+      - [`push` / `pull`](#push--pull)
+      - [`input`](#input)
+    - [Browser control](#browser-control)
+      - [`browser open`](#browser-open)
+      - [`browser cdp`](#browser-cdp)
+        - [Running a REPL against a privileged Edge page](#running-a-repl-against-a-privileged-edge-page)
+        - [Example REPL session on `edge://version`](#example-repl-session-on-edgeversion)
+        - [MojoJS is on by default for debuggable builds](#mojojs-is-on-by-default-for-debuggable-builds)
+        - [Gotcha — CDP is single-client per target](#gotcha--cdp-is-single-client-per-target)
+    - [Proxy \& traffic interception](#proxy--traffic-interception)
+      - [`proxy enable` / `proxy disable`](#proxy-enable--proxy-disable)
+      - [`proxy install-ca`](#proxy-install-ca)
+      - [`proxy hosts`](#proxy-hosts)
+      - [`proxy tcpdump`](#proxy-tcpdump)
+    - [Reconnaissance](#reconnaissance)
+      - [`recon`](#recon)
+    - [JS hooks](#js-hooks)
+      - [`hooks`](#hooks)
+    - [Pentest automation](#pentest-automation)
+      - [`pentest run`](#pentest-run)
+    - [Mojo IPC testing](#mojo-ipc-testing)
+      - [`mojo enable` (MojoJS bindings)](#mojo-enable-mojojs-bindings)
+      - [`mojo trigger`](#mojo-trigger)
+      - [`mojo trace`](#mojo-trace)
+      - [`mojo fuzz`](#mojo-fuzz)
+    - [Chrome flags](#chrome-flags)
+    - [File server](#file-server)
+      - [Python API](#python-api)
+    - [APK forensics](#apk-forensics)
+      - [`forensics scan`](#forensics-scan)
+      - [`forensics scan-app`](#forensics-scan-app)
+      - [`forensics secrets`](#forensics-secrets)
+      - [`forensics manifest`](#forensics-manifest)
+      - [`forensics app-data`](#forensics-app-data)
+      - [`forensics installed`](#forensics-installed)
+    - [Intent fuzzing](#intent-fuzzing)
+      - [`intent enumerate`](#intent-enumerate)
+      - [`intent fuzz`](#intent-fuzz)
+    - [Logcat](#logcat)
+      - [`logcat stream`](#logcat-stream)
+      - [`logcat capture`](#logcat-capture)
+    - [UI automation](#ui-automation)
+      - [`ui dump`](#ui-dump)
+      - [`ui tap`](#ui-tap)
+      - [`ui type`](#ui-type)
+      - [`ui monkey`](#ui-monkey)
+      - [CDP Input (Python API)](#cdp-input-python-api)
+    - [WebView enumeration](#webview-enumeration)
+      - [`webview list`](#webview-list)
+      - [`webview connect`](#webview-connect)
+  - [Python API](#python-api-1)
+    - [High-level Device API](#high-level-device-api)
+    - [Lower-level access](#lower-level-access)
+    - [Pentest scripting API](#pentest-scripting-api)
+  - [Environment variables](#environment-variables)
+  - [Headless / CI usage](#headless--ci-usage)
+  - [Physical device usage](#physical-device-usage)
+  - [Project structure](#project-structure)
+  - [Configuration](#configuration)
+  - [Troubleshooting](#troubleshooting)
+  - [License](#license)
+
+
 ---
 
 ## Quick-start
@@ -32,7 +111,7 @@ poetry run harness-android browser cdp --interactive
 poetry run harness-android recon --url "https://target.example.com" -o recon.json
 
 # 8 — Scan an installed app for hardcoded secrets (auto-pulls APK)
-poetry run harness-android forensics scan-app com.android.chrome
+poetry run harness-android forensics scan-app com.microsoft.emmx.local
 
 # 9 — Run a pentest script
 poetry run harness-android pentest run my_test.py --report findings.json
@@ -126,6 +205,7 @@ Install an APK.
 
 ```bash
 harness-android install my_app.apk
+harness-android install my_app.apk --sdcard   # install to SD card
 ```
 
 #### `screenshot`
@@ -175,29 +255,142 @@ harness-android browser cdp --page-screenshot page.png
 
 # Interactive JS REPL
 harness-android browser cdp --interactive
+
+# Attach to an already-running browser without restarting it
+harness-android -b edge-local browser cdp --attach --list-pages
+harness-android -b edge-local browser cdp --attach --target-url "sapphire" --interactive
+
+# Prepare CDP flags without restart; you launch the browser yourself
+harness-android -b edge-local browser cdp --prepare
+
+# Install an on-load JS payload (survives every subsequent navigation)
+# --inject accepts a file path OR inline JavaScript
+harness-android browser cdp --attach --inject ./my_hooks.js --navigate "https://target"
+harness-android browser cdp --attach --inject "window.__marker='X';" --js "window.__marker"
 ```
 
-The `--interactive` flag opens a JavaScript REPL that evaluates expressions directly in the Chrome page context via CDP `Runtime.evaluate`. Everything you type runs as JS in the browser:
+The `--interactive` flag opens a JavaScript REPL that evaluates expressions directly in the page context via CDP `Runtime.evaluate`. Everything you type runs as JS inside the target page — including **privileged `chrome://` / `edge://` pages** where `chrome.send`, internal cr APIs, and (when the build has `MojoJS` enabled) Mojo bindings are reachable.
+
+##### Running a REPL against a privileged Edge page
+
+Three ways to reach `edge://version`, `edge://settings`, `edge://new-tab`, etc. Pick the one that matches your current browser state.
+
+**1. Cold launch (no browser currently running with CDP flags)**
+
+Force-stops the browser, starts it with debug flags, navigates, drops into a REPL:
+
+```bash
+poetry run harness-android -b edge-local browser cdp \
+    --navigate "edge://version" \
+    --interactive
+```
+
+**2. Attach to an already-running browser (keeps state)**
+
+When the browser is already up with CDP flags — e.g. launched via `cdp_prepare_and_launch` from the MCP server — attach without restart and pick the page by URL substring (or exact id from `--list-pages`):
+
+```bash
+# Enumerate first
+poetry run harness-android -b edge-local browser cdp --attach --list-pages
+#   9  about:blank              about:blank
+#   1  https://www.bing.com/    Search - Microsoft Bing
+#   5  https://example.com/     Example Domain
+#   7  edge://new-tab/          edge://new-tab/
+#   8  edge://version/          About version
+
+# REPL pinned to edge://version
+poetry run harness-android -b edge-local browser cdp \
+    --attach --target-url "edge://version" \
+    --interactive
+
+# or by exact target id
+poetry run harness-android -b edge-local browser cdp \
+    --attach --target-id 8 --interactive
+```
+
+**3. One-shot `--js` (scriptable, no REPL)**
+
+Same flags, but prints a single expression result and exits — ideal for CI and shell pipelines:
+
+```bash
+poetry run harness-android -b edge-local browser cdp \
+    --attach --target-url "edge://version" \
+    --js "JSON.stringify({ver: document.querySelector('#version')?.textContent?.trim(), ua: navigator.userAgent})"
+```
+
+##### Example REPL session on `edge://version`
 
 ```
-cdp> document.title
-"Example Domain"
-cdp> window.location.href
-"https://example.com/"
-cdp> document.querySelectorAll('a').length
-1
-cdp> navigator.userAgent
-"Mozilla/5.0 (Linux; Android 15; ...) Chrome/124.0.6367.82 ..."
-cdp> document.cookie
-""
-cdp> typeof Mojo
-"undefined"
-cdp> window.location.href = 'https://httpbin.org/get'
-"https://httpbin.org/get"
-cdp> quit
+$ poetry run harness-android -b edge-local browser cdp --attach --target-url "edge://version" --interactive
+CDP attached — http://127.0.0.1:9222
+CDP connected → edge://version/
+REPL (js) — JavaScript expression. Type 'quit' or Ctrl+C to exit.
+
+js> location.href
+"edge://version/"
+
+js> document.querySelector('#version').textContent.trim()
+"149.0.3991.0 (Developer build) unknown (64-bit)"
+
+js> document.querySelector('#os_type').textContent
+"Android 15"
+
+js> navigator.userAgent
+"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36 EdgA/149.0.3991.0"
+
+# Privileged pages expose chrome.send on many WebUIs
+js> typeof chrome?.send
+"function"
+
+# Enumerate WebUI handlers cheaply
+js> Object.keys(chrome).slice(0, 20)
+["send","getVariableValue","timeTicks","csi","loadTimes"]
+
+# MojoJS is enabled by default on every edge-* preset
+# (edge, edge-canary, edge-dev, edge-local — built-in BrowserSpec.default_flags
+# includes --enable-blink-features=MojoJS,MojoJSTest)
+js> typeof Mojo
+"function"
+
+js> typeof MojoInterfaceInterceptor
+"function"
+
+# Bind any browser-process interface from a privileged origin
+js> const h = Mojo.bindInterface('blink.mojom.ClipboardHost', 'context', true); typeof h
+"object"
+
+# On settings / new-tab pages, cr.* helpers are usually present
+js> typeof cr !== 'undefined' ? Object.keys(cr).slice(0,10) : "no cr.*"
+"no cr.*"
+
+js> quit
 ```
 
 Type `quit`, `exit`, or press Ctrl+C to leave the REPL.
+
+##### MojoJS is on by default for every edge-* preset
+
+All four Edge presets (`edge`, `edge-canary`, `edge-dev`, `edge-local`) ship `--enable-blink-features=MojoJS,MojoJSTest` in `BrowserSpec.default_flags`, so `Mojo.bindInterface(...)`, `MojoInterfaceInterceptor`, and the MojoJSTest helpers are available on **every page** (including privileged `edge://…` origins) without having to pass `--chrome-flags` on every run.
+
+Release Edge / stable Chrome (`-b chrome`) are **not** debuggable and silently ignore the flag — `typeof Mojo` stays `"undefined"` there. For MojoJS you need a debuggable build such as `-b edge-local` or a dev/canary channel with the feature honoured.
+
+If you want to disable MojoJS for a specific run, pick `-b chrome` (release Chrome, no MojoJS) or extend with your own `chrome_flags` that override the feature list.
+
+##### Gotcha — CDP is single-client per target
+
+Chrome's DevTools protocol only allows **one client per page target**. If the MCP server (`harness-android-mcp`) is already attached to a page and you then run `browser cdp --attach --target-url …`, `Page.enable` will hang and time out with:
+
+```
+CDP Page.enable (id=1) timed out after 30s
+```
+
+To recover, either:
+
+- Call the MCP tool `cdp_disconnect` to release the page session, then retry the CLI, **or**
+- Use the cold-launch path (`--navigate` without `--attach`) which force-stops the browser and starts fresh, **or**
+- Target a different page — each page is independent, so a second client can safely attach to a target the MCP is *not* using.
+
+Browser-level inspection (`--list-pages`) is multi-client safe; only per-page `connect()` is exclusive.
 
 ### Proxy & traffic interception
 
@@ -510,7 +703,7 @@ Scans 27 secret patterns: AWS keys, Google API keys, GitHub/Slack/Stripe tokens,
 **One command to scan any installed app** — auto-pulls the APK from the device by package name and runs a full scan:
 
 ```bash
-harness-android forensics scan-app com.android.chrome
+harness-android forensics scan-app com.microsoft.emmx.local
 harness-android forensics scan-app com.example.app --app-data -o report.json
 ```
 
@@ -618,7 +811,7 @@ harness-android ui type "com.example:id/username" "admin@example.com"
 Run the Android monkey random event generator for stress testing:
 
 ```bash
-harness-android ui monkey -p com.android.chrome -n 10000
+harness-android ui monkey -p com.microsoft.emmx.local -n 10000
 harness-android ui monkey -p com.example.app --seed 42 -o monkey.log
 harness-android ui monkey --ignore-crashes --ignore-timeouts -n 50000
 ```
@@ -659,7 +852,7 @@ Example output:
 Found 2 debuggable WebView socket(s)
 ┃ Socket                       ┃ PID  ┃ Package                                        ┃ Pages    ┃
 │ webview_devtools_remote_1702 │ 1702 │ com.google.android.googlequicksearchbox:search │ no pages │
-│ chrome_devtools_remote       │ 0    │ com.android.chrome                             │ no pages │
+│ chrome_devtools_remote       │ 0    │ com.microsoft.emmx.local                       │ no pages │
 ```
 
 #### `webview connect`
@@ -677,6 +870,9 @@ harness-android webview connect chrome_devtools_remote --interactive
 
 # Take a screenshot of what the WebView is rendering
 harness-android webview connect webview_devtools_remote_1702 --page-screenshot shot.png
+
+# Install an on-load JS hook into a mini-app / third-party WebView
+harness-android webview connect webview_devtools_remote_1702 --inject ./hooks.js
 ```
 
 ---
@@ -793,6 +989,26 @@ Use `--gpu swiftshader_indirect` for software rendering in environments without 
 
 ---
 
+## Physical device usage
+
+All commands work on real Android devices over USB — not just the emulator. Enable **USB debugging** in Developer Settings, connect via USB, then use `-s` to target the device:
+
+```bash
+# List connected devices
+adb devices
+
+# Target a specific device by serial
+harness-android -s SERIAL install app.apk
+harness-android -s SERIAL -b edge browser cdp --interactive
+harness-android -s SERIAL recon --url "https://target.example.com" -o recon.json
+harness-android -s SERIAL forensics scan-app com.example.app
+harness-android -s SERIAL screenshot -o phone.png
+```
+
+If only one device is connected, `-s` is optional — ADB auto-selects it.
+
+---
+
 ## Project structure
 
 ```
@@ -800,7 +1016,7 @@ harness-android/
 ├── pyproject.toml              # Poetry config, dependencies, entry point
 ├── README.md                   # This file
 ├── ARCHITECTURE.md             # Detailed design & data-flow docs
-├── config.toml.example         # Example config file (copy as harness.json)
+├── harness.json.example        # Example config file (copy as harness.json)
 ├── .gitignore
 ├── examples/
 │   ├── recon_pentest.py         # Recon plugin (fingerprint, spider, headers, CSP)
@@ -851,8 +1067,8 @@ Example `harness.json`:
     "headless": false
   },
   "browser": {
-    "package": "com.android.chrome",
-    "activity": "com.google.android.apps.chrome.Main",
+    "package": "com.microsoft.emmx.local",
+    "activity": "com.microsoft.ruby.Main",
     "cdp_port": 9222
   },
   "proxy": {
