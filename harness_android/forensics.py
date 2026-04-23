@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from rich.console import Console
 from rich.table import Table
+
+from harness_android.console import console
 
 from harness_android.adb import ADB
 
-console = Console()
 
 
 # ======================================================================
@@ -59,17 +59,124 @@ SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern("Square Access Token", re.compile(r"sq0atp-[0-9A-Za-z\-_]{22,}"), "high"),
     SecretPattern("Square OAuth Secret", re.compile(r"sq0csp-[0-9A-Za-z\-_]{43,}"), "high"),
     SecretPattern("JWT Token", re.compile(r"eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+"), "high"),
-    SecretPattern("Private Key (PEM)", re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "critical"),
+    # Real PEM private key: header MUST be followed by base64 body (40+ chars)
+    # in the same extracted string — proves an actual key is embedded, not
+    # just the format marker from a crypto library's constant pool.
+    SecretPattern("Private Key (PEM)", re.compile(
+        r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+        r"[\s\x00-\x20]*[A-Za-z0-9+/=]{40,}"
+    ), "critical"),
     SecretPattern("Generic API Key", re.compile(r"(?i)(?:api[_\-]?key|apikey|api[_\-]?secret)[\s]*[=:]\s*[\"']([A-Za-z0-9\-_]{16,})[\"']"), "medium"),
     SecretPattern("Generic Secret", re.compile(r"(?i)(?:secret|password|passwd|pwd|token|auth[_\-]?token)[\s]*[=:]\s*[\"']([^\s\"']{8,})[\"']"), "medium"),
-    SecretPattern("Bearer Token", re.compile(r"(?i)bearer\s+[A-Za-z0-9\-_.~+/]+=*"), "high"),
+    # Bearer tokens: require the payload to actually look like a base64/hex/JWT
+    # token, not an English word. Min 20 chars + must contain a digit OR a `.`
+    # (JWT dot-separator) OR be >= 30 chars of mixed case.
+    SecretPattern("Bearer Token", re.compile(
+        r"(?i)bearer\s+([A-Za-z0-9\-_.~+/]{20,}=*)"
+    ), "high"),
     SecretPattern("Base64 Encoded Key", re.compile(r"(?i)(?:key|secret|password|token)[\s]*[=:]\s*[\"']([A-Za-z0-9+/]{40,}={0,2})[\"']"), "medium"),
     SecretPattern("Azure Storage Key", re.compile(r"(?i)DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{44,}"), "critical"),
     SecretPattern("Azure Connection String", re.compile(r"(?i)(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/=]{44,}"), "high"),
     SecretPattern("Hardcoded IP Address", re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"), "low"),
-    SecretPattern("Hardcoded URL with Credentials", re.compile(r"https?://[^:]+:[^@]+@[^\s\"']+"), "critical"),
+    # Restrict the user:pass portion to characters that actually appear in URL
+    # userinfo — no slashes, whitespace, quotes, backticks. This stops the
+    # regex from swallowing whole `.pak` localization strings when some `@`
+    # happens to appear later in the blob.
+    SecretPattern("Hardcoded URL with Credentials", re.compile(
+        r"https?://[A-Za-z0-9._~\-%]+:[A-Za-z0-9._~\-%]+@[A-Za-z0-9.\-]+"
+    ), "critical"),
 
 ]
+
+
+# ======================================================================
+# Placeholder / false-positive filters
+# ======================================================================
+
+# Credentials that are obviously placeholders — common in docs, samples, and
+# library source code. Case-insensitive exact match of the `user:pass` portion.
+_PLACEHOLDER_CREDS: set[str] = {
+    "user:pass", "user:password", "username:password", "user:passwd",
+    "admin:admin", "admin:password", "root:root", "test:test",
+    "foo:bar", "login:password", "me:mypass", "myuser:mypass",
+}
+
+# Values that "look like" secrets syntactically but are well-known
+# placeholder / descriptive strings. Reject Generic Secret / Bearer Token
+# matches whose captured value (case-insensitive) is in this set.
+_PLACEHOLDER_VALUES: set[str] = {
+    "authentication", "authorization", "authenticator", "challenge", "challenges",
+    "flows", "flow", "realm", "credentials", "credential",
+    "filetoken", "mipnoauthtoken", "noauthtoken",
+    "placeholder", "example", "sample", "dummy", "fake", "test",
+    "xxx", "xxxxxxxx", "yourtokenhere", "yoursecrethere", "yourkeyhere",
+    "changeme", "secret", "password", "token", "value",
+}
+
+
+def _looks_tokenish(s: str) -> bool:
+    """Heuristic: value looks like a real credential, not an English word.
+
+    Real tokens almost always contain a digit, a `.` (JWT), `-`/`_` (base64url),
+    `+`/`/` (base64), OR are >= 30 chars of mixed case letters.
+    Plain English words (`Authentication`, `Challenge`, `flows`) fail this.
+    """
+    if any(c.isdigit() for c in s):
+        return True
+    if any(c in s for c in "._-+/~="):
+        return True
+    has_upper = any(c.isupper() for c in s)
+    has_lower = any(c.islower() for c in s)
+    if len(s) >= 30 and has_upper and has_lower:
+        return True
+    return False
+
+
+def _is_false_positive(pattern_name: str, full_match: str,
+                       captured: str | None) -> bool:
+    """Filter obviously-noise matches before emitting a finding."""
+    value = (captured or full_match).strip().strip("\"'")
+
+    if pattern_name == "Hardcoded URL with Credentials":
+        # Extract the user:pass segment between `://` and the first `@`.
+        try:
+            auth = full_match.split("://", 1)[1].split("@", 1)[0]
+            if auth.lower() in _PLACEHOLDER_CREDS:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    if pattern_name in ("Generic Secret", "Generic API Key",
+                        "Base64 Encoded Key", "Bearer Token"):
+        if value.lower() in _PLACEHOLDER_VALUES:
+            return True
+        # "Bearer <something-dictionary-wordy>" — reject if the token is pure
+        # alphabetic AND short. Real bearer tokens pass _looks_tokenish.
+        if pattern_name == "Bearer Token" and not _looks_tokenish(value):
+            return True
+        # Generic Secret: reject pure-alphabetic CamelCase-y values <= 20 chars
+        # that don't look token-ish (catches `Token="fileToken"` etc.).
+        if pattern_name == "Generic Secret" and len(value) <= 20 and \
+                value.isalpha() and not _looks_tokenish(value):
+            return True
+
+    return False
+
+
+def _evidence_for(pattern_name: str, source: str, match: re.Match[str]) -> str:
+    """Return a useful evidence snippet. For PEM keys include the header +
+    first ~160 chars of key material so the fingerprint is visible."""
+    raw = match.group(0)
+    if pattern_name == "Private Key (PEM)":
+        # Capture header + up to 4 lines (~240 chars) of body so the key can
+        # be identified (fingerprinted, correlated, traced).
+        start = match.start()
+        return source[start:start + 300].rstrip()
+    # For everything else, keep evidence compact so the table stays readable.
+    if len(raw) > 200:
+        return raw[:200].rstrip() + "…"
+    return raw
 
 
 # ======================================================================
@@ -133,16 +240,19 @@ def scan_strings_for_secrets(
         for s in strings:
             for pat in SECRET_PATTERNS:
                 match = pat.pattern.search(s)
-                if match:
-                    matched = match.group(0)
-                    findings.append(ForensicFinding(
-                        category="secret",
-                        severity=pat.severity,
-                        title=pat.name,
-                        description=f"Found in {filepath}",
-                        evidence=matched,
-                        file_path=filepath,
-                    ))
+                if not match:
+                    continue
+                captured = match.group(1) if match.groups() else None
+                if _is_false_positive(pat.name, match.group(0), captured):
+                    continue
+                findings.append(ForensicFinding(
+                    category="secret",
+                    severity=pat.severity,
+                    title=pat.name,
+                    description=f"Found in {filepath}",
+                    evidence=_evidence_for(pat.name, s, match),
+                    file_path=filepath,
+                ))
     return findings
 
 
