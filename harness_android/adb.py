@@ -18,11 +18,10 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
-from rich.console import Console
+from harness_android.console import console
 
 from harness_android.config import get_adb
 
-console = Console()
 
 T = TypeVar("T")
 
@@ -57,6 +56,11 @@ def poll_until(
 
 # adb's `input text` treats these as shell metacharacters on the device side
 _INPUT_TEXT_ESCAPE = re.compile(r"([ \\()<>|;&*~'\"$`])")
+
+# Characters permitted in a *remote* path interpolated into a device-side
+# ``sh -c`` snippet. Keep this narrow: directory separators, word chars,
+# dots, dashes, plus a few symbols common in Android paths.
+_SAFE_REMOTE_PATH_RE = re.compile(r"[A-Za-z0-9._\-/+@:]+")
 
 
 class ADB:
@@ -186,9 +190,20 @@ class ADB:
 
         Uses ``adb shell cat > path`` with stdin so arbitrary content
         (quotes, newlines, binary) survives without shell escaping.
+
+        The path is interpolated into a device-side ``sh -c`` snippet,
+        so it may not contain shell metacharacters. In practice every
+        call-site inside the harness uses fixed paths under
+        ``/data/local/tmp/`` or similar — this guard just rules out
+        accidental injection if a caller ever forwards user input.
         """
         if isinstance(content, str):
             content = content.encode()
+        if not _SAFE_REMOTE_PATH_RE.fullmatch(remote_path):
+            raise ValueError(
+                f"write_file: refusing unsafe remote path {remote_path!r} "
+                "(allowed chars: A-Z a-z 0-9 . _ - / + @ :)"
+            )
         # `exec-in` streams stdin verbatim to the device-side command.
         proc = subprocess.run(
             self._base_cmd() + ["exec-in", f"sh -c 'cat > {remote_path}'"],
@@ -206,12 +221,14 @@ class ADB:
     # App management
     # ------------------------------------------------------------------
 
-    def install(self, apk_path: str | Path, replace: bool = True, grant: bool = True) -> None:
+    def install(self, apk_path: str | Path, replace: bool = True, grant: bool = True, sdcard: bool = False) -> None:
         args = ["install"]
         if replace:
             args.append("-r")
         if grant:
             args.append("-g")
+        if sdcard:
+            args.append("-s")
         args.append(str(apk_path))
         console.print(f"[bold]Installing {apk_path} …")
         self.run(*args, timeout=300)
