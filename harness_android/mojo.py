@@ -18,18 +18,19 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import struct
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
-from rich.console import Console
 from rich.table import Table
 
 from harness_android.browser import Browser, TargetCrashed
 from harness_android.fileserver import FileServer
+from harness_android.console import console
 
-console = Console()
 
 
 # ======================================================================
@@ -231,6 +232,44 @@ class MojoJS:
           const h = this.handles[idx];
           if (h) { h.close(); this.handles[idx] = null; }
         },
+        // Runtime probe: bind `name`, write a minimal header with method 0,
+        // then wait up to `timeoutMs` for the remote peer to close the pipe.
+        // A closed peer strongly suggests `name` is not registered with the
+        // current frame's BinderMap (browser/renderer dropped the request).
+        // Staying open OR replying means the interface IS registered.
+        probeRegistered(name, scope, timeoutMs) {
+          return new Promise(res => {
+            let pipe;
+            try {
+              pipe = Mojo.createMessagePipe();
+              Mojo.bindInterface(name, pipe.handle1, scope || 'process');
+            } catch (e) {
+              return res({registered: false, error: String(e && e.message || e)});
+            }
+            const h = pipe.handle0;
+            // 24-byte v1 header, method 0, no flags, request_id 0.
+            const hdr = new Uint8Array([
+              24,0,0,0,  1,0,0,0,  0,0,0,0,  0,0,0,0,  0,0,0,0,0,0,0,0,
+            ]);
+            try {
+              if (h.writeMessage) h.writeMessage(hdr, []);
+            } catch (e) { /* ignore — probe is the wait, not the write */ }
+            let done = false;
+            const finish = r => { if (done) return; done = true; try { h.close(); } catch(e){} res(r); };
+            let peer, reader;
+            try {
+              peer = h.watch({peerClosed: true}, () => finish({registered: false, reason: 'peer_closed'}));
+            } catch (e) { /* older builds: no peerClosed */ }
+            try {
+              reader = h.watch({readable: true}, () => finish({registered: true, reason: 'readable'}));
+            } catch (e) { /* ignore */ }
+            setTimeout(() => {
+              try { if (peer) peer.cancel(); } catch(e){}
+              try { if (reader) reader.cancel(); } catch(e){}
+              finish({registered: true, reason: 'timeout_no_disconnect'});
+            }, timeoutMs || 200);
+          });
+        },
       };
     }
     true
@@ -321,6 +360,121 @@ class MojoJS:
             hdr() + b"\x00" * 65536,
         ]
 
+    # -- self-enumeration ----------------------------------------------
+
+    def probe(self, interface: str, scope: str = "process",
+              timeout_ms: int = 200) -> dict[str, Any]:
+        """Probe whether *interface* is registered with the current frame.
+
+        Binds a pipe, writes a minimal v1 header with method 0, then waits
+        up to *timeout_ms* for the remote peer to close. Registered
+        interfaces usually keep the pipe open or produce a readable reply;
+        unregistered names trigger an immediate peer-close.
+
+        Returns ``{"interface": name, "registered": bool, "reason": str}``.
+        Note: this is a **heuristic**. Some real interfaces deliberately
+        close on malformed input (false negative), and peer-close timing
+        varies by build. Use together with ``discover_interfaces_from_gen``
+        for best coverage.
+        """
+        js = (
+            "__mojo.probeRegistered("
+            f"{json.dumps(interface)}, {json.dumps(scope)}, {int(timeout_ms)})"
+        )
+        try:
+            out = self.browser.evaluate_js(js, await_promise=True,
+                                           timeout=timeout_ms / 1000 + 5) or {}
+        except Exception as exc:  # noqa: BLE001
+            out = {"registered": False, "reason": f"eval_error: {exc}"}
+        return {"interface": interface,
+                "registered": bool(out.get("registered")),
+                "reason": out.get("reason", out.get("error", ""))}
+
+    def probe_all(
+        self,
+        interfaces: Iterable[str],
+        *,
+        scope: str = "process",
+        timeout_ms: int = 200,
+        stop_on_crash: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Probe every interface sequentially; reconnects on renderer crash.
+
+        Warning: sequential cost is O(len(interfaces) * timeout_ms). For a
+        full ``discover_interfaces_from_gen`` result (thousands of names)
+        this takes minutes; filter first (e.g. to ``blink.mojom.*`` or a
+        trace-derived subset).
+        """
+        results: list[dict[str, Any]] = []
+        names = list(interfaces)
+        console.print(
+            f"[bold]Probing {len(names)} Mojo interfaces "
+            f"(timeout={timeout_ms}ms each) …"
+        )
+        for iface in names:
+            try:
+                r = self.probe(iface, scope=scope, timeout_ms=timeout_ms)
+            except TargetCrashed as exc:
+                console.print(f"  [red bold]CRASH[/] probing {iface}: {exc}")
+                results.append({"interface": iface, "registered": False,
+                                "reason": f"renderer_crash: {exc}",
+                                "crashed": True})
+                self.browser.reconnect()
+                self.browser.evaluate_js(self._BOOTSTRAP)
+                if stop_on_crash:
+                    break
+                continue
+            results.append(r)
+        registered = sum(1 for r in results if r.get("registered"))
+        console.print(
+            f"[green]{registered}/{len(results)} interfaces appear registered "
+            f"from this origin."
+        )
+        return results
+
+
+# ======================================================================
+# Interface discovery (static + observational)
+# ======================================================================
+
+# Matches the module+interface name emitted in generated JS bindings, e.g.
+#   mojo.internal.interfaceProxy('blink.mojom.ClipboardHost', ...)
+#   or class definitions like
+#   export const ClipboardHost = { $: { name: 'blink.mojom.ClipboardHost' ...
+_MOJOM_NAME_RE = re.compile(
+    r"""['"]([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\.mojom(?:\.[A-Z][A-Za-z0-9_]*)?\.[A-Z][A-Za-z0-9_]+)['"]""",
+    re.VERBOSE,
+)
+
+
+def discover_interfaces_from_gen(gen_dir: str | Path) -> list[str]:
+    """Walk a Chromium ``gen/`` tree and extract every mojom interface
+    name that appears in the generated JS bindings. Returns a sorted
+    de-duplicated list of ``module.mojom.Interface`` strings.
+
+    This is the authoritative inventory of *every* interface the current
+    build can expose — independent of which ones the trace happened to
+    capture or which ones ``MOJO_WEB_API_TRIGGERS`` knows about.
+    """
+    gen = Path(gen_dir)
+    if not gen.exists():
+        raise FileNotFoundError(f"gen directory not found: {gen}")
+
+    found: set[str] = set()
+    # Prefer the smaller *-lite.js if present; fall back to mojom.js otherwise.
+    for pattern in ("*.mojom-lite.js", "*.mojom.js"):
+        for path in gen.rglob(pattern):
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for m in _MOJOM_NAME_RE.finditer(text):
+                name = m.group(1)
+                # Reject module-only strings with no trailing Interface.
+                if name.count(".") >= 2 and name.split(".")[-1][0].isupper():
+                    found.add(name)
+    return sorted(found)
+
 
 # ======================================================================
 # Passive tracer
@@ -386,15 +540,48 @@ class MojoTracer:
         try:
             parsed = json.loads(buf)
         except json.JSONDecodeError:
-            # Trace JSON is sometimes emitted unterminated; close the array.
-            try:
-                parsed = json.loads(buf.rstrip().rstrip(",") + "]")
-            except json.JSONDecodeError:
-                console.print("[yellow]Could not parse trace stream as JSON")
+            # Trace JSON is sometimes emitted unterminated — only try the
+            # "close the array" repair when the buffer actually *looks*
+            # truncated (trailing comma after an object), otherwise a
+            # mid-value corruption would be silently replaced with [].
+            stripped = buf.rstrip()
+            if stripped.endswith(",") or stripped.endswith("}"):
+                try:
+                    parsed = json.loads(stripped.rstrip(",") + "]")
+                except json.JSONDecodeError as exc:
+                    console.print(
+                        f"[yellow]Trace JSON could not be repaired: {exc}"
+                    )
+                    return []
+            else:
+                console.print(
+                    "[yellow]Trace stream does not look like valid JSON "
+                    "(no trailing ',' or '}'); returning no events."
+                )
                 return []
         if isinstance(parsed, dict):
             return parsed.get("traceEvents", [])
         return parsed if isinstance(parsed, list) else []
+
+    # -- discovery ------------------------------------------------------
+
+    def discover_interfaces_from_trace(
+        self,
+        messages: list[MojoMessage] | None = None,
+    ) -> list[str]:
+        """Unique ``module.mojom.Interface`` names observed in the trace.
+
+        This is *observational* discovery — only interfaces that actually
+        sent or received at least one IPC during the capture window. For
+        the authoritative inventory of everything the build can expose,
+        see :func:`discover_interfaces_from_gen`.
+        """
+        msgs = messages if messages is not None else self.extract_mojo_messages()
+        seen: set[str] = set()
+        for m in msgs:
+            if m.interface and ".mojom" in m.interface.lower():
+                seen.add(m.interface)
+        return sorted(seen)
 
     # -- analysis -------------------------------------------------------
 
