@@ -18,7 +18,9 @@ Run with: harness-android pentest run examples/mojo_recon.py
 def run(ctx):
     from harness_android.mojo import MojoTracer
 
-    ctx.navigate("https://example.com")
+    # edge:// pages expose privileged Mojo interfaces not available to https://
+    # origins (NTP APIs, history, settings, etc.) — richer attack surface.
+    ctx.navigate("edge://version")
 
     tracer = MojoTracer(ctx.browser, verbose=True)
 

@@ -9,8 +9,9 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from rich.console import Console
 from rich.table import Table
+
+from harness_android.console import console
 
 from harness_android.adb import ADB
 from harness_android.browser import Browser
@@ -24,7 +25,6 @@ from harness_android.config import (
 from harness_android.emulator import Emulator
 from harness_android.sdk import bootstrap_sdk, full_setup
 
-console = Console()
 
 # ======================================================================
 # Helpers
@@ -56,9 +56,24 @@ def _make_browser(
         browser=getattr(args, "browser", None) or "chrome",
         extra_flags=flags,
     )
-    b.enable_cdp()
+    if getattr(args, "attach", False):
+        b.attach_cdp()
+    elif getattr(args, "prepare", False):
+        b.prepare_cdp()
+        return b  # don't connect — browser may not be running yet
+    else:
+        b.enable_cdp()
     if connect:
-        b.connect()
+        target_id = getattr(args, "target_id", None)
+        url_sub = getattr(args, "target_url", None)
+        if url_sub and not target_id:
+            target_id = b.find_target(url_substring=url_sub)
+            if not target_id:
+                raise SystemExit(
+                    f"No CDP page target matched --target-url={url_sub!r}. "
+                    "Run `browser cdp --list-pages` to see available targets."
+                )
+        b.connect(target_id=target_id) if target_id else b.connect()
     return b
 
 
@@ -196,14 +211,19 @@ def cmd_status(_args: argparse.Namespace) -> None:
 def cmd_shell(args: argparse.Namespace) -> None:
     """Run a shell command on the device."""
     adb = ADB(serial=_find_serial(args))
-    output = adb.shell(*args.command)
+    command = args.command
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise SystemExit("shell: no command provided")
+    output = adb.shell(*command)
     sys.stdout.write(output)
 
 
 def cmd_install(args: argparse.Namespace) -> None:
     """Install an APK."""
     adb = ADB(serial=_find_serial(args))
-    adb.install(args.apk)
+    adb.install(args.apk, sdcard=args.sdcard)
 
 
 def cmd_screenshot(args: argparse.Namespace) -> None:
@@ -234,10 +254,35 @@ def cmd_browser_open(args: argparse.Namespace) -> None:
 
 def cmd_browser_cdp(args: argparse.Namespace) -> None:
     """Set up CDP and optionally navigate / run JS."""
+    if args.list_pages:
+        browser = _make_browser(args, connect=False)
+        targets = browser.list_targets()
+        pages = [t for t in targets if t.get("type") == "page"]
+        if not pages:
+            console.print("[yellow]No page targets found.")
+        for t in pages:
+            console.print(
+                f"[cyan]{t.get('id')}[/]  [white]{t.get('url') or '(blank)'}[/]  "
+                f"[dim]{t.get('title') or ''}"
+            )
+        browser.close()
+        return
+
     browser = _make_browser(args)
+
+    if args.inject:
+        script = _load_inject_script(args.inject)
+        ident = browser.inject_script_on_load(script)
+        console.print(f"[green]Injected on-load script (id={ident}) — active for future navigations.")
 
     if args.navigate:
         browser.navigate(args.navigate)
+    if args.wait_for:
+        try:
+            val = browser.wait_for_expression(args.wait_for, timeout=args.wait_timeout)
+            console.print(f"[green]wait-for {args.wait_for!r} resolved → {val!r}")
+        except TimeoutError as exc:
+            console.print(f"[red]{exc}")
     if args.js:
         result = browser.evaluate_js(args.js, await_promise=True)
         console.print(json.dumps(result, indent=2, default=str))
@@ -247,12 +292,22 @@ def cmd_browser_cdp(args: argparse.Namespace) -> None:
         browser.page_screenshot(args.page_screenshot)
     if args.interactive:
         _repl(browser, mode="js")
-    if not (args.navigate or args.js or args.title or args.page_screenshot or args.interactive):
+    if not (args.navigate or args.js or args.title or args.page_screenshot
+            or args.interactive or args.inject):
         console.print(
             f"[green]CDP ready on http://localhost:{args.port}/json\n"
-            "Use --navigate, --js, --title, --page-screenshot, or --interactive."
+            "Use --navigate, --js, --title, --page-screenshot, --inject, or --interactive."
         )
     browser.close()
+
+
+def _load_inject_script(path_or_inline: str) -> str:
+    """If ``path_or_inline`` is an existing file, read it; else treat as inline JS."""
+    import os
+    if os.path.isfile(path_or_inline):
+        with open(path_or_inline, "r", encoding="utf-8") as f:
+            return f.read()
+    return path_or_inline
 
 
 def cmd_input_tap(args: argparse.Namespace) -> None:
@@ -650,8 +705,10 @@ def cmd_forensics_installed(args: argparse.Namespace) -> None:
 
 def cmd_webview_list(args: argparse.Namespace) -> None:
     from harness_android.webview import enumerate_webviews, print_webviews
+    from harness_android.browser import resolve_browser
     adb = ADB(serial=_find_serial(args))
-    webviews = enumerate_webviews(adb)
+    pkg = resolve_browser(getattr(args, "browser", None)).package
+    webviews = enumerate_webviews(adb, default_chrome_package=pkg)
     print_webviews(webviews)
 
 
@@ -661,11 +718,16 @@ def cmd_webview_connect(args: argparse.Namespace) -> None:
     browser = connect_webview(adb, args.socket, local_port=args.port)
     console.print(f"[green]Connected to {args.socket} on localhost:{args.port}")
 
+    if args.inject:
+        script = _load_inject_script(args.inject)
+        ident = browser.inject_script_on_load(script)
+        console.print(f"[green]Injected on-load script (id={ident}, {len(script)} bytes)")
+
     if args.navigate:
         browser.navigate(args.navigate)
 
     try:
-        console.print(f"Page: {browser.get_page_title()} — {browser.get_page_url()}")
+        console.print(f"Page: {browser.get_page_title()} - {browser.get_page_url()}")
     except Exception:  # noqa: BLE001
         console.print("[dim]Could not read page title (page may still be loading)")
 
@@ -897,7 +959,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-b", "--browser", default=None,
-        choices=["chrome", "chromium", "edge", "edge-canary", "edge-dev"],
+        choices=["chrome", "chromium", "edge", "edge-canary", "edge-dev", "edge-local"],
         help="Target browser (default: chrome)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -953,13 +1015,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_status)
 
     # ---- shell ----
-    p = sub.add_parser("shell", help="Run a shell command on the device")
-    p.add_argument("command", nargs="+", help="Shell command")
+    p = sub.add_parser(
+        "shell",
+        help="Run a shell command on the device",
+        description="Run a shell command on the device. Use -- to pass flags like -n or -a.",
+    )
+    p.add_argument("command", nargs=argparse.REMAINDER, help="Shell command (use -- before flags)")
     p.set_defaults(func=cmd_shell)
 
     # ---- install ----
     p = sub.add_parser("install", help="Install an APK")
     p.add_argument("apk", help="Path to .apk file")
+    p.add_argument("--sdcard", action="store_true", help="Install to SD card")
     p.set_defaults(func=cmd_install)
 
     # ---- screenshot ----
@@ -991,10 +1058,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = bsub.add_parser("cdp", help="Chrome DevTools Protocol control")
     p.add_argument("--port", type=int, default=CDP_LOCAL_PORT, help="Local CDP port")
     p.add_argument("--chrome-flags", help='Space-separated Chrome flags (e.g. "--flag1 --flag2")')
+    p.add_argument("--attach", action="store_true",
+                    help="Connect to an already-running browser (no restart)")
+    p.add_argument("--prepare", action="store_true",
+                    help="Write CDP flags only — browser picks them up on next launch")
+    p.add_argument("--list-pages", action="store_true",
+                    help="List all CDP page targets and exit (does not pick a page)")
+    p.add_argument("--target-url",
+                    help="Attach to the first page target whose URL contains this substring")
+    p.add_argument("--target-id",
+                    help="Attach to the page target with this exact CDP id")
     p.add_argument("--navigate", "-n", help="Navigate to URL")
     p.add_argument("--js", "-j", help="Evaluate JavaScript expression")
     p.add_argument("--title", action="store_true", help="Print page title")
     p.add_argument("--page-screenshot", help="Save page screenshot to path")
+    p.add_argument("--inject", metavar="FILE_OR_JS",
+                    help="Install a Page.addScriptToEvaluateOnNewDocument script "
+                         "(path to .js file, or inline JavaScript string)")
+    p.add_argument("--wait-for", metavar="EXPR",
+                    help="After navigate, poll this JS expression until truthy before running --js "
+                         "(races away late-appearing globals like sapphireWebViewBridge)")
+    p.add_argument("--wait-timeout", type=float, default=10.0,
+                    help="Timeout in seconds for --wait-for (default 10)")
     p.add_argument("--interactive", "-i", action="store_true", help="Enter CDP REPL")
     p.set_defaults(func=cmd_browser_cdp)
 
@@ -1170,6 +1255,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--js", help="Evaluate JavaScript expression")
     p.add_argument("--title", action="store_true", help="Print page title")
     p.add_argument("--page-screenshot", metavar="FILE", help="Save page screenshot")
+    p.add_argument("--inject", metavar="FILE_OR_JS",
+                    help="Install on-load JavaScript into this WebView (path or inline)")
     p.add_argument("--interactive", action="store_true", help="Interactive JS REPL")
     p.set_defaults(func=cmd_webview_connect)
 
