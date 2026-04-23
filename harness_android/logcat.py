@@ -9,12 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
 from rich.table import Table
+
+from harness_android.console import console
 
 from harness_android.adb import ADB
 
-console = Console()
 
 
 @dataclass
@@ -131,11 +131,19 @@ class LogcatCapture:
         f = open(self._output_path, "w", encoding="utf-8", errors="replace")
         try:
             self._process = self.adb.popen(*args, stdout=f, stderr=subprocess.STDOUT)
+            self._file = f
+            console.print(f"[green]Logcat capture started → {self._output_path}")
         except Exception:
+            # popen failed OR console.print failed; clean up before re-raising.
+            if self._process is not None:
+                try:
+                    self._process.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._process = None
             f.close()
+            self._file = None
             raise
-        self._file = f
-        console.print(f"[green]Logcat capture started → {self._output_path}")
         return self._output_path
 
     def stop(self) -> Path:

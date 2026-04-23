@@ -13,11 +13,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
 
 from harness_android.adb import ADB
+from harness_android.console import console
 
-console = Console()
 
 # Default proxy address — the emulator sees the host as 10.0.2.2
 EMULATOR_HOST_LOOPBACK = "10.0.2.2"

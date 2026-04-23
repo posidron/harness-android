@@ -14,12 +14,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from rich.console import Console
 from rich.table import Table
+
+from harness_android.console import console
 
 from harness_android.adb import ADB
 
-console = Console()
 
 
 # ======================================================================

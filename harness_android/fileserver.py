@@ -13,9 +13,8 @@ import socketserver
 import threading
 from pathlib import Path
 
-from rich.console import Console
+from harness_android.console import console
 
-console = Console()
 
 
 class _Handler(http.server.SimpleHTTPRequestHandler):

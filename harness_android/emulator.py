@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
+from harness_android.console import console
 
 from harness_android.adb import ADB, poll_until
 from harness_android.config import (
@@ -24,7 +24,6 @@ from harness_android.config import (
     get_system_image_package,
 )
 
-console = Console()
 
 
 def _emulator_env(**extra: str) -> dict[str, str]:
@@ -121,7 +120,7 @@ class Emulator:
         wipe_data: bool = False,
         cold_boot: bool = False,
         no_snapshot_save: bool = False,
-        writable_system: bool = False,
+        writable_system: bool = True,
         extra_args: Optional[list[str]] = None,
         boot_timeout: float = 300,
     ) -> ADB:
@@ -154,7 +153,7 @@ class Emulator:
             "-gpu", gpu,
             "-memory", str(ram),
             "-no-boot-anim",
-            "-read-only" if not writable_system else "-writable-system",
+            "-writable-system" if writable_system else "-read-only",
         ]
         if headless:
             cmd.append("-no-window")

@@ -10,11 +10,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rich.console import Console
+from harness_android.console import console
 
 from harness_android.browser import Browser
 
-console = Console()
 
 # ======================================================================
 # Built-in hook scripts

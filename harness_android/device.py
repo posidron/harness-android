@@ -5,15 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
 
 from harness_android.adb import ADB
 from harness_android.browser import Browser
 from harness_android.config import DEFAULT_API_LEVEL, DEFAULT_AVD_NAME
 from harness_android.emulator import Emulator
 from harness_android.sdk import full_setup
+from harness_android.console import console
 
-console = Console()
 
 
 class Device:

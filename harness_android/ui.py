@@ -19,13 +19,13 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Optional
 
-from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
+from harness_android.console import console
+
 from harness_android.adb import ADB
 
-console = Console()
 
 
 # ── UIAutomator hierarchy ────────────────────────────────────────────

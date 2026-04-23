@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 import requests
-from rich.console import Console
+from harness_android.console import console
 from rich.progress import (
     BarColumn,
     DownloadColumn,
@@ -32,7 +32,6 @@ from harness_android.config import (
     get_system_image_package,
 )
 
-console = Console()
 
 
 def _download_with_progress(url: str) -> bytes:
