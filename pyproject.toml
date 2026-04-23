@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Cross-platform Android emulator harness with remote control capabilities"
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
-packages = [{include = "harness_android"}]
+packages = [
+    {include = "harness_android"},
+    {include = "harness_android_mcp"},
+]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -12,9 +15,11 @@ requests = "^2.31"
 websocket-client = "^1.7"
 rich = "^13.7"
 Pillow = "^10.2"
+mcp = "^1.2"
 
 [tool.poetry.scripts]
 harness-android = "harness_android.cli:main"
+harness-android-mcp = "harness_android_mcp:main"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

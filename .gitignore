@@ -16,8 +16,7 @@ poetry.lock
 venv/
 ENV/
 
-# IDE
-.vscode/
+# IDEA
 .idea/
 *.swp
 *.swo

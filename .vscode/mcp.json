@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "harness-android": {
+      "type": "stdio",
+      "command": "poetry",
+      "args": ["run", "harness-android-mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
