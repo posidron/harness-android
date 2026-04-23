@@ -14,11 +14,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from rich.console import Console
+import websocket
 
 from harness_android.browser import Browser
+from harness_android.console import console
 
-console = Console()
 
 
 @dataclass
@@ -238,11 +238,26 @@ class Interceptor:
             try:
                 ws.settimeout(1.0)
                 raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            except websocket.WebSocketConnectionClosedException:
+                # Browser went away — stop listening cleanly.
+                self._running = False
+                return
+            except KeyboardInterrupt:
+                self._running = False
+                raise
+            if not raw:
+                continue
+            try:
                 data = json.loads(raw)
-                if data.get("method") == "Fetch.requestPaused":
+            except json.JSONDecodeError:
+                continue
+            if data.get("method") == "Fetch.requestPaused":
+                try:
                     self._handle_request_paused(data["params"])
-            except Exception:  # noqa: BLE001 — timeout or transient
-                pass
+                except Exception as exc:  # noqa: BLE001 — keep loop alive
+                    console.print(f"[red]Interceptor handler error: {exc}")
 
     def start(self, background: bool = False) -> None:
         """Enable interception and start the event loop.
