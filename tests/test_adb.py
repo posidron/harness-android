@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from harness_android.adb import poll_until, _INPUT_TEXT_ESCAPE
+from harness_android.adb import ADB, poll_until, _INPUT_TEXT_ESCAPE, _SAFE_REMOTE_PATH_RE
 
 
 def test_poll_until_returns_first_truthy():
@@ -61,3 +61,50 @@ def test_poll_until_timeout_on_falsy():
 )
 def test_input_text_escape_regex(raw, expect):
     assert _INPUT_TEXT_ESCAPE.sub(r"\\\1", raw) == expect
+
+
+# ---------------------------------------------------------------------
+# _SAFE_REMOTE_PATH_RE / ADB.write_file — guard against shell injection
+# when the device-side redirection path is interpolated into ``sh -c``.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/data/local/tmp/chrome-command-line",
+        "/data/local/tmp/com.microsoft.emmx.local-command-line",
+        "/sdcard/evidence.png",
+        "/system/etc/security/cacerts/abc12345.0",
+        "relative/path.txt",
+        "-with-dash",
+        "@special@",
+    ],
+)
+def test_safe_remote_path_accepts_harness_paths(path: str) -> None:
+    assert _SAFE_REMOTE_PATH_RE.fullmatch(path) is not None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/data/local/tmp/foo; rm -rf /",
+        "/data/local/tmp/$(echo pwn)",
+        "/data/local/tmp/`whoami`",
+        "/data/local/tmp/foo'bar",
+        "/data/local/tmp/foo\"bar",
+        "/data/local/tmp/foo bar",   # plain space
+        "/data/local/tmp/foo|tee",
+        "/data/local/tmp/foo>bar",
+        "/data/local/tmp/foo\nbar",  # newline
+    ],
+)
+def test_safe_remote_path_rejects_shell_metacharacters(path: str) -> None:
+    assert _SAFE_REMOTE_PATH_RE.fullmatch(path) is None
+
+
+def test_write_file_rejects_unsafe_path_with_value_error() -> None:
+    """End-to-end guard: unsafe path must raise ``ValueError`` before
+    anything is handed to subprocess / ``sh -c``."""
+    adb = ADB.__new__(ADB)  # skip constructor (no real device needed)
+    with pytest.raises(ValueError, match="refusing unsafe remote path"):
+        adb.write_file("/data/local/tmp/evil; rm -rf /", b"payload")

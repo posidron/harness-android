@@ -81,3 +81,60 @@ def test_browser_spec_from_string(monkeypatch):
     spec = BROWSERS["edge"]
     assert isinstance(spec, BrowserSpec)
     assert spec.name == "edge"
+
+
+@pytest.mark.parametrize("name", ["edge", "edge-canary", "edge-dev", "edge-local"])
+def test_every_edge_preset_enables_mojojs_by_default(name: str) -> None:
+    """MojoJS bindings must be on by default for every edge-* preset so
+    ``Mojo.bindInterface`` is reachable on every page (incl. privileged
+    ``edge://`` origins) without having to pass ``--chrome-flags``.
+
+    Release Edge silently ignores the flag, so it's a no-op on
+    non-debuggable builds — but leaving it on everywhere keeps the
+    story consistent for the user.
+    """
+    spec = BROWSERS[name]
+    flags = " ".join(spec.default_flags)
+    assert "MojoJS" in flags, (
+        f"{name} is missing --enable-blink-features=MojoJS,MojoJSTest "
+        f"in default_flags ({spec.default_flags!r})"
+    )
+
+
+@pytest.mark.parametrize("name", ["chrome", "chromium"])
+def test_non_edge_presets_have_no_extra_default_flags(name: str) -> None:
+    """``chrome`` and ``chromium`` presets intentionally don't flip
+    MojoJS — a previous refactor briefly added it to ``chromium`` by
+    mistake. Keep them minimal."""
+    assert BROWSERS[name].default_flags == ()
+
+
+def test_write_chrome_flags_prepends_spec_defaults(monkeypatch):
+    """``_write_chrome_flags`` must include every ``spec.default_flags``
+    entry alongside the common CDP flags, before any extra_flags."""
+    b = Browser.__new__(Browser)
+    b.spec = BROWSERS["edge-local"]
+    b._extra_chrome_flags = ["--my-custom-flag"]
+    b.adb = None  # we'll patch adb.write_file / .run below
+
+    written: dict[str, str] = {}
+
+    class _FakeADB:
+        def write_file(self, path, content):
+            written[path] = content
+
+        def run(self, *args, **kwargs):  # noqa: ARG002
+            class R:
+                returncode = 0
+                stdout = ""
+            return R()
+
+    b.adb = _FakeADB()
+    b._write_chrome_flags()
+
+    flags = next(iter(written.values()))
+    assert "--enable-blink-features=MojoJS,MojoJSTest" in flags
+    assert "--remote-debugging-port=0" in flags
+    assert "--my-custom-flag" in flags
+    # default_flags must come before extra_flags.
+    assert flags.index("MojoJS") < flags.index("--my-custom-flag")
