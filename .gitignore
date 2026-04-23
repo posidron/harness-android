@@ -46,3 +46,7 @@ app_data/
 
 # Logs
 *.log
+
+# Local crash dumps / investigation scratch
+assets/
+
