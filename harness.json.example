@@ -1,0 +1,54 @@
+{
+  "_comment": "harness-android configuration. Copy this to ./harness.json (project-local, takes priority) or ~/.android-harness/config.json (user-global). CLI flags override config values. Config overrides built-in defaults. Note: despite the old .toml.example filename, the loader reads JSON only.",
+
+  "emulator": {
+    "ram": 4096,
+    "gpu": "auto",
+    "avd_name": "harness_device",
+    "api_level": 35,
+    "device_profile": "pixel_7",
+    "headless": false,
+    "no_boot_anim": true
+  },
+
+  "browser": {
+    "package": "com.android.chrome",
+    "activity": "com.google.android.apps.chrome.Main",
+    "cdp_port": 9222,
+    "chrome_flags": []
+  },
+
+  "proxy": {
+    "host": "10.0.2.2",
+    "port": 8080
+  },
+
+  "_browser_presets_note": "The -b CLI flag selects a preset that overrides browser.package/activity. Known presets:",
+  "_browser_presets": {
+    "chrome":      "com.android.chrome                     / com.google.android.apps.chrome.Main",
+    "chromium":    "org.chromium.chrome                    / com.google.android.apps.chrome.Main  (debuggable; needed for CDP on API 35+)",
+    "edge":        "com.microsoft.emmx                     / com.microsoft.ruby.Main",
+    "edge-canary": "com.microsoft.emmx.canary              / com.microsoft.ruby.Main",
+    "edge-dev":    "com.microsoft.emmx.dev                 / com.microsoft.ruby.Main",
+    "edge-local":  "com.microsoft.emmx.local               / com.microsoft.ruby.Main              (local debuggable Edge build; recommended for MojoJS + CDP work)"
+  },
+
+  "_examples": {
+    "ci_headless": {
+      "emulator": { "headless": true, "gpu": "swiftshader_indirect", "ram": 2048 }
+    },
+    "debuggable_chromium_for_cdp_api35": {
+      "browser": { "package": "org.chromium.chrome" }
+    },
+    "edge_local_with_mojojs": {
+      "browser": {
+        "package": "com.microsoft.emmx.local",
+        "activity": "com.microsoft.ruby.Main",
+        "chrome_flags": ["--enable-blink-features=MojoJS,MojoJSTest"]
+      }
+    },
+    "mitmproxy_on_host": {
+      "proxy": { "host": "10.0.2.2", "port": 8080 }
+    }
+  }
+}
