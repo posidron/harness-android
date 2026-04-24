@@ -796,7 +796,18 @@ def recon_storage() -> dict:
 
 @mcp.tool()
 def recon_csp() -> dict:
-    """Analyze Content-Security-Policy on the current page."""
+    """Analyze Content-Security-Policy on the current page.
+
+    Checks both the response header (``Content-Security-Policy`` and
+    ``Content-Security-Policy-Report-Only``) *and* any ``<meta http-equiv>``
+    tag, and flags the common weaknesses (``unsafe-inline``, ``unsafe-eval``,
+    wildcards, report-only, meta-only).
+
+    The response-header path reads ``Browser.main_frame_response_headers``,
+    which is populated by ``cdp_navigate``. If the page was loaded outside
+    the harness (e.g. attached post-launch and never navigated), only the
+    meta-tag path is available — results will say so.
+    """
     from harness_android import recon
     b = _require_browser()
     if isinstance(b, dict): return b
@@ -814,7 +825,17 @@ def recon_cookies() -> dict:
 
 @mcp.tool()
 def recon_security_headers() -> dict:
-    """Check presence/absence of common security headers."""
+    """Check presence/absence of common security headers.
+
+    Reads the real response headers captured during ``cdp_navigate`` (via
+    CDP ``Network.responseReceived`` for the main-frame Document response).
+    No second fetch is issued, so CORS-stripped page-JS views are never
+    substituted for the real server response.
+
+    If the page was attached to without a harness navigate(), the cache is
+    empty and every header is reported as missing — call ``cdp_navigate``
+    first for accurate results.
+    """
     from harness_android import recon
     b = _require_browser()
     if isinstance(b, dict): return b
