@@ -7,6 +7,7 @@ interception works transparently.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,10 @@ from harness_android.console import console
 # Default proxy address — the emulator sees the host as 10.0.2.2
 EMULATOR_HOST_LOOPBACK = "10.0.2.2"
 DEFAULT_PROXY_PORT = 8080
+
+# Accepts hostnames / FQDNs and IPv4/IPv6 literals without shell metacharacters.
+_SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9._\-:]+$")
+_SAFE_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
 
 
 class Proxy:
@@ -65,8 +70,7 @@ class Proxy:
         if not cert_path.exists():
             raise FileNotFoundError(f"Certificate not found: {cert_path}")
 
-        # Convert to PEM if needed and compute the hash-based filename
-        pem_data = cert_path.read_bytes()
+        # Compute the hash-based filename Android expects in the system store.
         hash_name = self._compute_cert_hash(cert_path)
 
         remote_tmp = f"/sdcard/{hash_name}"
@@ -99,9 +103,13 @@ class Proxy:
     def install_mitmproxy_ca(self) -> None:
         """Download and install the mitmproxy CA cert.
 
-        Assumes mitmproxy is running on the host. The CA cert is available
-        at ``http://mitm.it/cert/pem`` when the proxy is active, or from
-        the default location ``~/.mitmproxy/mitmproxy-ca-cert.pem``.
+        Prefers the local copy at ``~/.mitmproxy/mitmproxy-ca-cert.pem``.
+        If missing, falls back to fetching ``http://mitm.it/cert/pem``
+        *through* the running mitmproxy — that virtual hostname is only
+        resolvable by mitmproxy itself, so the request must be routed via
+        the proxy on localhost, not sent directly to ``self.host``
+        (which is the emulator-side alias ``10.0.2.2`` and is not
+        reachable from the host running this Python process).
         """
         ca_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         if ca_path.exists():
@@ -109,13 +117,14 @@ class Proxy:
             self.install_ca_cert(ca_path)
             return
 
-        # Try fetching from the running proxy
+        # Try fetching from the running proxy via its magic mitm.it hostname.
         import requests
+        proxy_url = f"http://localhost:{self.port}"
         try:
             resp = requests.get(
-                f"http://{self.host}:{self.port}/cert/pem",
+                "http://mitm.it/cert/pem",
                 timeout=5,
-                proxies={"http": f"http://localhost:{self.port}"},
+                proxies={"http": proxy_url, "https": proxy_url},
             )
             resp.raise_for_status()
             with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
@@ -125,7 +134,8 @@ class Proxy:
             tmp.unlink(missing_ok=True)
         except Exception as exc:
             raise RuntimeError(
-                f"Could not find mitmproxy CA cert at {ca_path} or fetch from proxy: {exc}"
+                f"Could not find mitmproxy CA cert at {ca_path} or fetch it "
+                f"through the proxy at {proxy_url}: {exc}"
             ) from exc
 
     def _compute_cert_hash(self, cert_path: Path) -> str:
@@ -150,10 +160,17 @@ class Proxy:
     # ------------------------------------------------------------------
 
     def start_tcpdump(self, remote_path: str = "/sdcard/capture.pcap") -> str:
-        """Start tcpdump on the device in the background. Returns remote path."""
+        """Start tcpdump on the device in the background.
+
+        Requires root and tcpdump on PATH (stock emulator images ship
+        neither; use ``-writable-system`` + a debuggable ``userdebug``
+        image, or push a tcpdump binary first).  ``setsid`` fully detaches
+        the child from the transient ``adb shell`` so the capture keeps
+        running after this call returns.
+        """
         self.adb.run(
             "shell",
-            f"nohup tcpdump -i any -w {remote_path} &",
+            f"setsid nohup tcpdump -i any -U -w {remote_path} >/dev/null 2>&1 < /dev/null &",
             check=False,
         )
         console.print(f"[green]tcpdump started → {remote_path}")
@@ -175,6 +192,12 @@ class Proxy:
 
     def add_hosts_entry(self, ip: str, hostname: str) -> None:
         """Add an entry to /etc/hosts on the emulator (needs root)."""
+        if not _SAFE_IP_RE.fullmatch(ip):
+            raise ValueError(f"Refusing to write hosts entry: unsafe ip {ip!r}")
+        if not _SAFE_HOSTNAME_RE.fullmatch(hostname):
+            raise ValueError(
+                f"Refusing to write hosts entry: unsafe hostname {hostname!r}"
+            )
         self.adb.run(
             "shell",
             f"echo '{ip} {hostname}' >> /etc/hosts",

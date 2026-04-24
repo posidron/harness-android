@@ -157,20 +157,23 @@ class Interceptor:
                 h["name"]: h["value"]
                 for h in params.get("responseHeaders", [])
             }
-            # Fetch the response body
-            try:
-                body_result = self.browser.send(
-                    "Fetch.getResponseBody",
-                    {"requestId": req.request_id},
-                )
-                body_b64 = body_result.get("body", "")
-                is_base64 = body_result.get("base64Encoded", False)
-                req.response_body = (
-                    base64.b64decode(body_b64) if is_base64
-                    else body_b64.encode()
-                )
-            except Exception:  # noqa: BLE001
-                req.response_body = b""
+            # Fetch the response body only when a response handler is
+            # registered — otherwise we waste bandwidth decoding bodies
+            # that no one will look at.
+            if self._response_handlers:
+                try:
+                    body_result = self.browser.send(
+                        "Fetch.getResponseBody",
+                        {"requestId": req.request_id},
+                    )
+                    body_b64 = body_result.get("body", "")
+                    is_base64 = body_result.get("base64Encoded", False)
+                    req.response_body = (
+                        base64.b64decode(body_b64) if is_base64
+                        else body_b64.encode()
+                    )
+                except Exception:  # noqa: BLE001
+                    req.response_body = b""
 
             self._log.append(req)
             self._dispatch_response(req)
@@ -227,8 +230,11 @@ class Interceptor:
                     self.browser.send("Fetch.fulfillRequest", fulfill_params)
                     return
 
-        # No modification — continue
-        self.browser.send("Fetch.continueRequest", {"requestId": req.request_id})
+        # No modification — release the response.  At response stage the
+        # correct continuation is ``Fetch.continueResponse``; calling
+        # ``continueRequest`` here is rejected by CDP with
+        # "Invalid InterceptionId" and the response hangs.
+        self.browser.send("Fetch.continueResponse", {"requestId": req.request_id})
 
     def _listen_loop(self) -> None:
         """Read CDP events and dispatch Fetch.requestPaused."""
@@ -269,11 +275,19 @@ class Interceptor:
         self._running = True
 
         if background:
-            self._listener_thread = threading.Thread(
-                target=self._listen_loop, daemon=True,
+            # The Browser session multiplexes CDP commands and events over a
+            # single WebSocket with no dispatcher / lock.  Running the
+            # listener on a second thread while the main thread can still
+            # call browser.send(...) races ws.recv() between threads and
+            # silently swaps responses for events.  Until the browser
+            # client grows a proper dispatcher we refuse this mode loudly
+            # instead of corrupting traffic.
+            raise NotImplementedError(
+                "Interceptor(background=True) is unsafe with the current "
+                "single-threaded CDP client — call start() without background "
+                "and run other CDP work from the same thread, or run the "
+                "interceptor in a separate Browser session."
             )
-            self._listener_thread.start()
-            console.print("[green]Interceptor running in background.")
         else:
             console.print("[bold]Interceptor running — press Ctrl-C to stop.")
             try:
@@ -317,6 +331,6 @@ class Interceptor:
                 entry["response_status"] = req.response_status
                 entry["response_headers"] = req.response_headers
             entries.append(entry)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=2)
         console.print(f"[green]Intercept log written to {path} ({len(entries)} entries)")
