@@ -38,6 +38,10 @@ page*.png
 
 # Forensics output
 app_data/
+
+# Agent-generated commit-message scratch files
+.msg.tmp
+.commit-msg.tmp
 *_report.json
 *_forensics.json
 *_raw.json
