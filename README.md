@@ -1072,10 +1072,16 @@ api_level = 35
 headless  = false
 ```
 
-> Package / activity / MojoJS default flags for each browser preset
-> live in `harness_android/browser.py` and are intentionally **not**
-> exposed in config — they define the preset. Override per-command
-> with `-b <preset>` or `--chrome-flags=...`.
+> Each browser preset (package, activity, cmdline files, default
+> flags) is defined in `harness_android/browser.py`. To override any
+> field for a preset, add a `[browsers.<name>]` table to
+> `harness.toml` — only list fields you want to change, the rest are
+> inherited:
+>
+> ```toml
+> [browsers.edge-local]
+> default_flags = ["--enable-blink-features=MojoJS,MojoJSTest", "--v=1"]
+> ```
 
 ---
 

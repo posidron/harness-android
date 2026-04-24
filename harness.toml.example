@@ -7,10 +7,7 @@
 
 # Which browser preset -b uses when you don't pass it explicitly.
 # Valid: chrome | chromium | edge | edge-canary | edge-dev | edge-local
-# You can still force any preset per-command (e.g. `-b chrome`); this
-# only controls the implicit default. Package/activity/MojoJS defaults
-# live in harness_android/browser.py — config intentionally cannot
-# override them (they're preset-defining, not user-tunable).
+# You can still force any preset per-command (e.g. `-b chrome`).
 default_browser = "edge-local"
 
 # Flags appended to every browser launch, on top of the preset's own
@@ -24,3 +21,26 @@ cores     = 4                # vCPUs (0 = auto: min(4, host_cpu/2))
 gpu       = "auto"           # auto | host | swiftshader_indirect | angle_indirect | off
 api_level = 35               # Android 15
 headless  = false
+
+# ---------------------------------------------------------------------
+# Per-preset overrides.
+# Any [browsers.<name>] table layers on top of the built-in preset
+# defined in harness_android/browser.py. Only list the fields you want
+# to change; everything else is inherited. Uncomment and edit as needed.
+# ---------------------------------------------------------------------
+
+# [browsers.edge-local]
+# package       = "com.microsoft.emmx.local"
+# activity      = "com.microsoft.ruby.Main"
+# cmdline_files = [
+#     "/data/local/tmp/microsoft-edge-local-command-line",
+#     "/data/local/tmp/chrome-command-line",
+# ]
+# # Extra flags baked into this preset (applied before extra_chrome_flags
+# # and --chrome-flags). MojoJS is already on by default for edge-*.
+# default_flags = ["--enable-blink-features=MojoJS,MojoJSTest"]
+
+# [browsers.chrome]
+# # e.g. point the `chrome` preset at a sideloaded debuggable build.
+# package  = "org.chromium.chrome"
+# activity = "com.google.android.apps.chrome.Main"

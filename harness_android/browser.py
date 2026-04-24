@@ -130,6 +130,51 @@ BROWSERS: dict[str, BrowserSpec] = {
 }
 
 
+def _apply_config_overrides(spec: BrowserSpec) -> BrowserSpec:
+    """Apply ``[browsers.<name>]`` overrides from ``harness.toml`` if any.
+
+    Every field on :class:`BrowserSpec` is optionally overridable:
+
+    .. code-block:: toml
+
+        [browsers.edge-local]
+        package       = "com.microsoft.emmx.local"
+        activity      = "com.microsoft.ruby.Main"
+        cmdline_files = [
+            "/data/local/tmp/microsoft-edge-local-command-line",
+            "/data/local/tmp/chrome-command-line",
+        ]
+        default_flags = ["--enable-blink-features=MojoJS,MojoJSTest"]
+
+    Unspecified fields inherit from the built-in preset. Unknown keys
+    are ignored (emit no warning \u2014 TOML typos would otherwise be
+    silently ineffective and users expect forward-compat). Tuple-typed
+    fields accept TOML arrays.
+    """
+    try:
+        from harness_android.config import load_config
+        cfg = load_config()
+    except Exception:  # noqa: BLE001
+        return spec
+    browsers_cfg = cfg.get("browsers") or {}
+    override = browsers_cfg.get(spec.name) or {}
+    if not override:
+        return spec
+    import dataclasses
+    allowed = {f.name for f in dataclasses.fields(BrowserSpec)}
+    kwargs = {}
+    for k, v in override.items():
+        if k not in allowed:
+            continue
+        # Preserve dataclass types: cmdline_files / default_flags are tuples.
+        if k in ("cmdline_files", "default_flags") and isinstance(v, list):
+            v = tuple(v)
+        kwargs[k] = v
+    if not kwargs:
+        return spec
+    return dataclasses.replace(spec, **kwargs)
+
+
 def resolve_browser(name_or_pkg: str | None) -> BrowserSpec:
     """Resolve a preset name or package string to a :class:`BrowserSpec`.
 
@@ -137,6 +182,11 @@ def resolve_browser(name_or_pkg: str | None) -> BrowserSpec:
     ``harness.toml``'s ``default_browser`` (falling back to ``chrome``
     for backwards-compatibility) so users can change the implicit
     default without passing ``-b`` on every command.
+
+    Any matching ``[browsers.<name>]`` table in ``harness.toml`` is
+    layered on top of the built-in preset, so users can override
+    package, activity, cmdline files or default flags without editing
+    source.
     """
     if not name_or_pkg:
         try:
@@ -145,10 +195,10 @@ def resolve_browser(name_or_pkg: str | None) -> BrowserSpec:
         except Exception:  # noqa: BLE001
             name_or_pkg = "chrome"
     if name_or_pkg in BROWSERS:
-        return BROWSERS[name_or_pkg]
+        return _apply_config_overrides(BROWSERS[name_or_pkg])
     for spec in BROWSERS.values():
         if spec.package == name_or_pkg:
-            return spec
+            return _apply_config_overrides(spec)
     # Unknown package — assume Chromium-based defaults.
     return BrowserSpec(
         name=name_or_pkg,

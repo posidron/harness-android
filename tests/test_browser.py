@@ -56,6 +56,40 @@ def test_resolve_browser_falls_back_to_chrome_on_config_error(monkeypatch):
     assert spec.name == "chrome"
 
 
+def test_resolve_browser_applies_per_preset_overrides(monkeypatch):
+    """`[browsers.<name>]` in harness.toml must layer onto the preset."""
+    import harness_android.config as cfg_mod
+    from harness_android import browser as bmod
+
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {
+        "browsers": {
+            "edge-local": {
+                "package": "com.example.custom",
+                "default_flags": ["--foo", "--bar"],
+                "cmdline_files": ["/data/local/tmp/custom-cmdline"],
+                "bogus_field": "ignored",  # unknown keys must be dropped
+            }
+        }
+    })
+    spec = bmod.resolve_browser("edge-local")
+    assert spec.name == "edge-local"           # preserved
+    assert spec.package == "com.example.custom"
+    assert spec.default_flags == ("--foo", "--bar")
+    assert spec.cmdline_files == ("/data/local/tmp/custom-cmdline",)
+    # Fields not in the override still come from the preset.
+    assert spec.activity == BROWSERS["edge-local"].activity
+    assert spec.devtools_socket == "chrome_devtools_remote"
+
+
+def test_resolve_browser_no_overrides_returns_builtin_preset(monkeypatch):
+    import harness_android.config as cfg_mod
+    from harness_android import browser as bmod
+
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+    spec = bmod.resolve_browser("edge-local")
+    assert spec == BROWSERS["edge-local"]
+
+
 class _FakeSession:
     def __init__(self):
         self.calls = []
