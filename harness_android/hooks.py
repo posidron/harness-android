@@ -18,25 +18,38 @@ from harness_android.browser import Browser
 # ======================================================================
 # Built-in hook scripts
 # ======================================================================
+#
+# Each hook is wrapped in its own IIFE.  The shared ``__harness_hooks__``
+# collector is *always* re-initialised for the slot the hook owns, and a
+# per-hook guard (``__harness_hook_<name>__``) prevents double-wrapping
+# native APIs across multiple ``Page.addScriptToEvaluateOnNewDocument``
+# calls or repeated navigations.
+#
+# Earlier versions of this file shared a single ``if (window.__harness_hooks__)
+# return;`` guard at the top of the preamble.  That meant the *first*
+# hook installed everything its preamble set up but the *second and later*
+# hooks short-circuited before instrumenting their target API — silently
+# leaving most hooks un-installed.
 
-# Each hook stores intercepted data in ``window.__harness_hooks__``.
-
-_HOOK_PREAMBLE = """
-(function() {
-    if (window.__harness_hooks__) return;  // already injected
-    window.__harness_hooks__ = {
-        xhr: [],
-        fetch: [],
-        cookies: [],
-        websocket: [],
-        postMessages: [],
-        console: [],
-        storage: [],
-        forms: [],
-    };
+_PREAMBLE_TEMPLATE = """
+(function() {{
+    if (!window.__harness_hooks__) {{
+        window.__harness_hooks__ = {{
+            xhr: [], fetch: [], cookies: [], websocket: [],
+            postMessages: [], console: [], storage: [], forms: []
+        }};
+    }}
+    if (!window.__harness_hooks__["{slot}"]) window.__harness_hooks__["{slot}"] = [];
+    if (window.__harness_hook_{slot}__) return;  // this hook already wrapped
+    window.__harness_hook_{slot}__ = true;
 """
 
-HOOK_XHR = _HOOK_PREAMBLE + """
+
+def _wrap(slot: str, body: str) -> str:
+    return _PREAMBLE_TEMPLATE.format(slot=slot) + body + "\n})();\n"
+
+
+HOOK_XHR = _wrap("xhr", """
     var _open = XMLHttpRequest.prototype.open;
     var _send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url) {
@@ -53,24 +66,34 @@ HOOK_XHR = _HOOK_PREAMBLE + """
         });
         return _send.apply(this, arguments);
     };
-})();
-"""
+""")
 
-HOOK_FETCH = _HOOK_PREAMBLE + """
+HOOK_FETCH = _wrap("fetch", """
     var _fetch = window.fetch;
     window.fetch = function(input, init) {
-        var url = (typeof input === 'string') ? input : input.url;
-        var method = (init && init.method) ? init.method : 'GET';
-        var body = (init && init.body) ? String(init.body).substring(0, 4096) : null;
+        var url, method, body = null;
+        if (input && typeof input === 'object' && 'url' in input) {
+            // Request object — method/body live on the Request, init may override
+            url = input.url;
+            method = (init && init.method) || input.method || 'GET';
+            try {
+                if (init && init.body) body = String(init.body).substring(0, 4096);
+            } catch (e) { body = '[unserialisable]'; }
+        } else {
+            url = String(input);
+            method = (init && init.method) || 'GET';
+            try {
+                if (init && init.body) body = String(init.body).substring(0, 4096);
+            } catch (e) { body = '[unserialisable]'; }
+        }
         window.__harness_hooks__.fetch.push({
             url: url, method: method, body: body, timestamp: Date.now()
         });
         return _fetch.apply(this, arguments);
     };
-})();
-"""
+""")
 
-HOOK_COOKIES = _HOOK_PREAMBLE + """
+HOOK_COOKIES = _wrap("cookies", """
     var _cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
                       Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
     if (_cookieDesc) {
@@ -85,12 +108,11 @@ HOOK_COOKIES = _HOOK_PREAMBLE + """
             configurable: true
         });
     }
-})();
-"""
+""")
 
-HOOK_WEBSOCKET = _HOOK_PREAMBLE + """
+HOOK_WEBSOCKET = _wrap("websocket", """
     var _WS = window.WebSocket;
-    window.WebSocket = function(url, protocols) {
+    function HarnessWS(url, protocols) {
         window.__harness_hooks__.websocket.push({
             action: 'connect', url: url, timestamp: Date.now()
         });
@@ -104,23 +126,33 @@ HOOK_WEBSOCKET = _HOOK_PREAMBLE + """
             return _send(data);
         };
         return ws;
-    };
-    window.WebSocket.prototype = _WS.prototype;
-})();
-"""
+    }
+    // Preserve static constants (CONNECTING/OPEN/CLOSING/CLOSED) and any
+    // other own properties that page code may read off the constructor.
+    try {
+        Object.getOwnPropertyNames(_WS).forEach(function(k) {
+            if (k === 'length' || k === 'name' || k === 'prototype') return;
+            try { HarnessWS[k] = _WS[k]; } catch (e) {}
+        });
+    } catch (e) {}
+    HarnessWS.prototype = _WS.prototype;
+    window.WebSocket = HarnessWS;
+""")
 
-HOOK_POSTMESSAGE = _HOOK_PREAMBLE + """
+HOOK_POSTMESSAGE = _wrap("postMessages", """
     window.addEventListener('message', function(e) {
+        var serialised;
+        try { serialised = JSON.stringify(e.data); }
+        catch (err) { serialised = String(e.data); }
         window.__harness_hooks__.postMessages.push({
             origin: e.origin,
-            data: JSON.stringify(e.data).substring(0, 4096),
+            data: (serialised || '').substring(0, 4096),
             timestamp: Date.now()
         });
     }, true);
-})();
-"""
+""")
 
-HOOK_CONSOLE = _HOOK_PREAMBLE + """
+HOOK_CONSOLE = _wrap("console", """
     ['log', 'warn', 'error', 'info', 'debug'].forEach(function(level) {
         var _orig = console[level];
         console[level] = function() {
@@ -135,10 +167,9 @@ HOOK_CONSOLE = _HOOK_PREAMBLE + """
             return _orig.apply(console, arguments);
         };
     });
-})();
-"""
+""")
 
-HOOK_STORAGE = _HOOK_PREAMBLE + """
+HOOK_STORAGE = _wrap("storage", """
     ['localStorage', 'sessionStorage'].forEach(function(name) {
         var _store = window[name];
         if (!_store) return;
@@ -151,10 +182,9 @@ HOOK_STORAGE = _HOOK_PREAMBLE + """
             return _setItem(key, value);
         };
     });
-})();
-"""
+""")
 
-HOOK_FORMS = _HOOK_PREAMBLE + """
+HOOK_FORMS = _wrap("forms", """
     document.addEventListener('submit', function(e) {
         var form = e.target;
         var data = {};
@@ -167,8 +197,7 @@ HOOK_FORMS = _HOOK_PREAMBLE + """
             fields: data, timestamp: Date.now()
         });
     }, true);
-})();
-"""
+""")
 
 # Map of hook names to scripts
 BUILTIN_HOOKS: dict[str, str] = {
@@ -230,6 +259,7 @@ class Hooks:
 
     def install_custom(self, name: str, script: str) -> None:
         """Install a custom JS snippet that runs on every page load."""
+        self.browser.send("Page.enable")
         result = self.browser.send(
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": script},
@@ -272,7 +302,7 @@ class Hooks:
     def dump(self, path: str = "hooks_data.json") -> None:
         """Collect all hook data and write to a JSON file."""
         data = self.collect()
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
         total = sum(len(v) for v in data.values() if isinstance(v, list))
         console.print(f"[green]Hook data saved to {path} ({total} entries)")
