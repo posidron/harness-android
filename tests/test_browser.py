@@ -28,6 +28,34 @@ def test_backward_compat_constants():
     assert browser_mod.CHROME_ACTIVITY == BROWSERS["chrome"].activity
 
 
+def test_resolve_browser_uses_default_browser_from_config(monkeypatch):
+    """resolve_browser(None) must honour harness.toml's default_browser."""
+    from harness_android import browser as bmod
+
+    monkeypatch.setattr(
+        bmod, "BROWSERS", BROWSERS, raising=False,
+    )
+    # Point load_config at a fake so we don't depend on the filesystem.
+    def fake_load_config():
+        return {"default_browser": "edge-local"}
+    import harness_android.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "load_config", fake_load_config)
+
+    spec = bmod.resolve_browser(None)
+    assert spec.name == "edge-local"
+
+
+def test_resolve_browser_falls_back_to_chrome_on_config_error(monkeypatch):
+    import harness_android.config as cfg_mod
+    from harness_android import browser as bmod
+
+    def broken():
+        raise RuntimeError("boom")
+    monkeypatch.setattr(cfg_mod, "load_config", broken)
+    spec = bmod.resolve_browser(None)
+    assert spec.name == "chrome"
+
+
 class _FakeSession:
     def __init__(self):
         self.calls = []

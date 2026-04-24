@@ -55,22 +55,19 @@ _DEFAULT_CONFIG = {
     "emulator": {
         "ram": 4096,
         "gpu": "auto",
+        "cores": 0,              # 0 = auto (min(4, cpu_count()//2))
         "avd_name": DEFAULT_AVD_NAME,
         "api_level": DEFAULT_API_LEVEL,
         "device_profile": DEFAULT_DEVICE_PROFILE,
         "headless": False,
         "no_boot_anim": True,
     },
-    "browser": {
-        "package": "com.android.chrome",
-        "activity": "com.google.android.apps.chrome.Main",
-        "cdp_port": CDP_LOCAL_PORT,
-        "chrome_flags": [],
-    },
-    "proxy": {
-        "host": "10.0.2.2",
-        "port": 8080,
-    },
+    # Selector used when `-b / --browser` is not passed on the CLI.
+    # Valid values: chrome, chromium, edge, edge-canary, edge-dev, edge-local.
+    "default_browser": "edge-local",
+    # Flags appended to every browser launch, on top of the preset's own
+    # default_flags (e.g. MojoJS for edge-*) and any `--chrome-flags=` CLI arg.
+    "extra_chrome_flags": [],
 }
 
 

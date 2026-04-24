@@ -46,14 +46,20 @@ def _make_browser(
     connect: bool = True,
 ) -> Browser:
     """Build, enable and connect a Browser from common CLI args."""
+    from harness_android.config import load_config
     adb = _make_adb(args)
-    flags = list(extra_flags or [])
+    cfg = load_config()
+    # Precedence: preset default_flags < extra_chrome_flags from TOML
+    # < --chrome-flags on CLI < explicit extra_flags arg.
+    flags: list[str] = []
+    flags.extend(cfg.get("extra_chrome_flags", []) or [])
     if getattr(args, "chrome_flags", None):
         flags.extend(args.chrome_flags.split())
+    flags.extend(extra_flags or [])
     b = Browser(
         adb,
         local_port=getattr(args, "port", CDP_LOCAL_PORT),
-        browser=getattr(args, "browser", None) or "chrome",
+        browser=getattr(args, "browser", None),
         extra_flags=flags,
     )
     if getattr(args, "attach", False):
@@ -145,6 +151,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     ram = args.ram if args.ram != 4096 else cfg.get("ram", 4096)
     gpu = args.gpu if args.gpu != "auto" else cfg.get("gpu", "auto")
     headless = args.headless or cfg.get("headless", False)
+    cores = getattr(args, "cores", 0) or cfg.get("cores", 0)
 
     emu = Emulator(avd_name=name, api_level=api, arch=getattr(args, 'arch', 'x86_64'))
     if not emu.avd_exists():
@@ -154,6 +161,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         headless=headless,
         gpu=gpu,
         ram=ram,
+        cores=cores,
         wipe_data=args.wipe,
         cold_boot=getattr(args, "cold_boot", False),
         no_snapshot_save=getattr(args, "no_snapshot_save", False),
@@ -248,7 +256,7 @@ def cmd_pull(args: argparse.Namespace) -> None:
 
 def cmd_browser_open(args: argparse.Namespace) -> None:
     """Open a URL in the target browser via intent (no CDP)."""
-    browser = Browser(_make_adb(args), browser=getattr(args, "browser", None) or "chrome")
+    browser = Browser(_make_adb(args), browser=getattr(args, "browser", None))
     browser.open_url(args.url)
 
 
@@ -910,12 +918,16 @@ def cmd_mojo_enable(args: argparse.Namespace) -> None:
     """Restart the browser with MojoJS enabled; optionally serve gen/ and fuzz."""
     from harness_android.mojo import enable_mojojs, MojoJS
 
+    from harness_android.config import load_config
     adb = _make_adb(args)
-    extra = args.chrome_flags.split() if getattr(args, "chrome_flags", None) else []
+    cfg = load_config()
+    extra: list[str] = list(cfg.get("extra_chrome_flags", []) or [])
+    if getattr(args, "chrome_flags", None):
+        extra.extend(args.chrome_flags.split())
     browser = Browser(
         adb,
         local_port=args.port,
-        browser=getattr(args, "browser", None) or "chrome",
+        browser=getattr(args, "browser", None),
         extra_flags=extra,
     )
     server = enable_mojojs(
@@ -1001,6 +1013,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--headless", action="store_true", help="No GUI window")
     p.add_argument("--gpu", default="auto", help="GPU mode (auto|host|swiftshader_indirect|off)")
     p.add_argument("--ram", type=int, default=4096, help="RAM in MB (default: 4096)")
+    p.add_argument("--cores", type=int, default=0,
+                   help="vCPU cores (default: config or min(4, cpu_count/2))")
     p.add_argument("--wipe", action="store_true", help="Wipe user data + cold boot")
     p.add_argument("--cold-boot", action="store_true", help="Force cold boot, ignore saved snapshot")
     p.add_argument("--no-snapshot-save", action="store_true", help="Don't save snapshot on exit")

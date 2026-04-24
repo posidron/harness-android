@@ -131,9 +131,19 @@ BROWSERS: dict[str, BrowserSpec] = {
 
 
 def resolve_browser(name_or_pkg: str | None) -> BrowserSpec:
-    """Resolve a preset name or package string to a :class:`BrowserSpec`."""
+    """Resolve a preset name or package string to a :class:`BrowserSpec`.
+
+    When ``name_or_pkg`` is ``None`` the harness consults
+    ``harness.toml``'s ``default_browser`` (falling back to ``chrome``
+    for backwards-compatibility) so users can change the implicit
+    default without passing ``-b`` on every command.
+    """
     if not name_or_pkg:
-        return BROWSERS["chrome"]
+        try:
+            from harness_android.config import load_config
+            name_or_pkg = load_config().get("default_browser", "chrome")
+        except Exception:  # noqa: BLE001
+            name_or_pkg = "chrome"
     if name_or_pkg in BROWSERS:
         return BROWSERS[name_or_pkg]
     for spec in BROWSERS.values():

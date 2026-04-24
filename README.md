@@ -170,6 +170,7 @@ Boot the emulator. Automatically creates an AVD if none exists.
 harness-android start
 harness-android start --headless           # no window (CI)
 harness-android start --gpu host --ram 4096
+harness-android start --cores 6            # more vCPUs (default 4)
 harness-android start --wipe               # fresh data
 harness-android start --cold-boot          # skip snapshot, full boot
 harness-android start --no-snapshot-save   # don't save snapshot on exit
@@ -635,11 +636,10 @@ harness-android browser cdp --chrome-flags="--disable-web-security" --interactiv
 harness-android browser cdp --chrome-flags="--enable-blink-features=MojoJS --disable-site-isolation-trials --v=1" --interactive
 ```
 
-Flags can also be set in `harness.toml`:
+Flags can also be set in `harness.toml` (applied to every browser launch):
 
 ```toml
-[browser]
-chrome_flags = ["--enable-logging", "--v=1"]
+extra_chrome_flags = ["--enable-logging", "--v=1"]
 ```
 
 ### File server
@@ -1059,21 +1059,23 @@ release but emit a deprecation warning — convert them to TOML.
 Example `harness.toml`:
 
 ```toml
+# Browser preset used when -b is not passed on the CLI.
+default_browser    = "edge-local"
+# Appended to every browser launch (preset default_flags still apply).
+extra_chrome_flags = []
+
 [emulator]
 ram       = 4096
-gpu       = "host"
+cores     = 4              # 0 = auto: min(4, host_cpu/2)
+gpu       = "auto"         # auto | host | swiftshader_indirect | off
 api_level = 35
 headless  = false
-
-[browser]
-package  = "com.microsoft.emmx.local"
-activity = "com.microsoft.ruby.Main"
-cdp_port = 9222
-
-[proxy]
-host = "10.0.2.2"
-port = 8080
 ```
+
+> Package / activity / MojoJS default flags for each browser preset
+> live in `harness_android/browser.py` and are intentionally **not**
+> exposed in config — they define the preset. Override per-command
+> with `-b <preset>` or `--chrome-flags=...`.
 
 ---
 

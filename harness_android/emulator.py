@@ -117,6 +117,7 @@ class Emulator:
         headless: bool = False,
         gpu: str = "auto",
         ram: int = 4096,
+        cores: int = 4,
         wipe_data: bool = False,
         cold_boot: bool = False,
         no_snapshot_save: bool = False,
@@ -147,12 +148,23 @@ class Emulator:
                 "The --arch arm64 option is for ARM64 hosts (e.g. Apple Silicon Macs)."
             )
 
+        # `cores <= 0` means "auto": pick min(4, half the host CPUs) so we
+        # don't starve the host. Clamp to at least 1 and at most 16 (the
+        # emulator's hard cap).
+        if cores <= 0:
+            import os as _os
+            cores = max(1, min(4, (_os.cpu_count() or 2) // 2))
+        cores = max(1, min(16, cores))
+
         cmd = [
             str(emulator),
             "-avd", self.avd_name,
             "-gpu", gpu,
             "-memory", str(ram),
+            "-cores", str(cores),
             "-no-boot-anim",
+            "-no-audio",       # skip audio HAL init, small but free speedup
+            "-no-metrics",     # skip Google metrics opt-in phone-home
             "-writable-system" if writable_system else "-read-only",
         ]
         if headless:
