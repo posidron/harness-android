@@ -50,7 +50,7 @@ EMULATOR_CONSOLE_PORT = 5554
 CDP_REMOTE_PORT = 9222  # Chrome DevTools Protocol on device
 CDP_LOCAL_PORT = 9222   # Forwarded to host
 
-# Default harness configuration — overridden by config.json, then by CLI flags
+# Default harness configuration — overridden by harness.toml, then by CLI flags
 _DEFAULT_CONFIG = {
     "emulator": {
         "ram": 4096,
@@ -88,28 +88,60 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def load_config() -> dict:
     """Load harness configuration.
 
-    Searches (in order):
-    1. ``./harness.json`` (project-local)
-    2. ``~/.android-harness/config.json`` (user-global)
-    3. Built-in defaults
+    Searches (in order, later entries override earlier ones):
+
+    1. Built-in defaults (:data:`_DEFAULT_CONFIG`)
+    2. ``~/.android-harness/config.toml`` (user-global)
+    3. ``./harness.toml`` (project-local)
+
+    Legacy ``.json`` files at the same paths are still read for one
+    release but emit a deprecation warning \u2014 migrate with
+    ``harness-android config migrate`` or by hand (TOML sections map
+    1:1 to JSON objects).
 
     Returns the merged config dict.
     """
-    import json as _json
+    try:
+        import tomllib  # type: ignore[import-not-found]  # Python 3.11+
+    except ImportError:  # pragma: no cover - Python 3.10 fallback
+        import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+
     config = _DEFAULT_CONFIG.copy()
 
-    paths = [
+    toml_paths = [
+        get_harness_home() / "config.toml",
+        Path("harness.toml"),
+    ]
+    json_paths = [
         get_harness_home() / "config.json",
         Path("harness.json"),
     ]
-    for p in paths:
+
+    import sys
+
+    for p in toml_paths:
         if p.is_file():
+            try:
+                with open(p, "rb") as f:
+                    user = tomllib.load(f)
+                config = _deep_merge(config, user)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[harness] warning: ignoring {p}: {exc}", file=sys.stderr)
+
+    for p in json_paths:
+        if p.is_file():
+            import json as _json
+            print(
+                f"[harness] warning: {p} uses the legacy JSON format; "
+                f"rename to {p.with_suffix('.toml')} and convert to TOML "
+                f"(see harness.toml.example). JSON support will be removed.",
+                file=sys.stderr,
+            )
             try:
                 with open(p) as f:
                     user = _json.load(f)
                 config = _deep_merge(config, user)
             except Exception as exc:  # noqa: BLE001
-                import sys
                 print(f"[harness] warning: ignoring {p}: {exc}", file=sys.stderr)
 
     return config

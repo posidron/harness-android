@@ -16,6 +16,9 @@ websocket-client = "^1.7"
 rich = "^13.7"
 Pillow = "^10.2"
 mcp = "^1.2"
+# stdlib `tomllib` lands in 3.11; use the `tomli` backport on 3.10 so
+# harness.toml loading works everywhere we support.
+tomli = { version = "^2.0", python = "<3.11" }
 
 [tool.poetry.scripts]
 harness-android = "harness_android.cli:main"

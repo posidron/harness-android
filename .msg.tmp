@@ -1,0 +1,17 @@
+feat(config): migrate to TOML (keep JSON read-path as deprecated legacy)
+
+- New loader reads ~/.android-harness/config.toml and ./harness.toml via
+  stdlib tomllib (3.11+) with a tomli fallback for 3.10.
+- Legacy config.json / harness.json still parsed but emit a deprecation
+  warning pointing users at harness.toml.example.
+- harness.json.example deleted; harness.toml.example added with proper
+  # comments for every field plus commented-out example profiles
+  (CI/headless, debuggable Chromium, local Edge with MojoJS bindings).
+- pyproject.toml: tomli ^2.0 as a conditional dep (python < 3.11).
+- tests/test_config.py rewritten: TOML override, project-beats-global,
+  invalid TOML warning, legacy-JSON-still-read-with-deprecation,
+  TOML+JSON coexistence, invalid JSON warning. 8 tests (up from 4).
+- README.md updated in 3 places: chrome_flags example, project tree,
+  Configuration section (priority list + example block now TOML).
+
+Suite: 138 passed, 1 skipped.

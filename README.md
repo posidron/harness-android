@@ -635,14 +635,11 @@ harness-android browser cdp --chrome-flags="--disable-web-security" --interactiv
 harness-android browser cdp --chrome-flags="--enable-blink-features=MojoJS --disable-site-isolation-trials --v=1" --interactive
 ```
 
-Flags can also be set in `harness.json`:
+Flags can also be set in `harness.toml`:
 
-```json
-{
-  "browser": {
-    "chrome_flags": ["--enable-logging", "--v=1"]
-  }
-}
+```toml
+[browser]
+chrome_flags = ["--enable-logging", "--v=1"]
 ```
 
 ### File server
@@ -1016,7 +1013,7 @@ harness-android/
 ├── pyproject.toml              # Poetry config, dependencies, entry point
 ├── README.md                   # This file
 ├── ARCHITECTURE.md             # Detailed design & data-flow docs
-├── harness.json.example        # Example config file (copy as harness.json)
+├── harness.toml.example        # Example config file (copy as harness.toml)
 ├── .gitignore
 ├── examples/
 │   ├── recon_pentest.py         # Recon plugin (fingerprint, spider, headers, CSP)
@@ -1052,30 +1049,30 @@ harness-android/
 Settings are loaded from (in priority order):
 
 1. **CLI flags** — always win
-2. **`./harness.json`** — project-local config
-3. **`~/.android-harness/config.json`** — user-global config
+2. **`./harness.toml`** — project-local config
+3. **`~/.android-harness/config.toml`** — user-global config
 4. **Built-in defaults**
 
-Example `harness.json`:
+Legacy `harness.json` / `config.json` files are still read for one
+release but emit a deprecation warning — convert them to TOML.
 
-```json
-{
-  "emulator": {
-    "ram": 4096,
-    "gpu": "host",
-    "api_level": 35,
-    "headless": false
-  },
-  "browser": {
-    "package": "com.microsoft.emmx.local",
-    "activity": "com.microsoft.ruby.Main",
-    "cdp_port": 9222
-  },
-  "proxy": {
-    "host": "10.0.2.2",
-    "port": 8080
-  }
-}
+Example `harness.toml`:
+
+```toml
+[emulator]
+ram       = 4096
+gpu       = "host"
+api_level = 35
+headless  = false
+
+[browser]
+package  = "com.microsoft.emmx.local"
+activity = "com.microsoft.ruby.Main"
+cdp_port = 9222
+
+[proxy]
+host = "10.0.2.2"
+port = 8080
 ```
 
 ---

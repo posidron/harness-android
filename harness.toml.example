@@ -1,0 +1,49 @@
+# harness-android configuration.
+#
+# Copy this to either:
+#   ./harness.toml                        — project-local (takes priority)
+#   ~/.android-harness/config.toml        — user-global
+# CLI flags override config values; config overrides built-in defaults.
+
+[emulator]
+ram            = 4096
+gpu            = "auto"            # auto | host | swiftshader_indirect | angle_indirect | off
+avd_name       = "harness_device"
+api_level      = 35                # Android 15
+device_profile = "pixel_7"
+headless       = false
+no_boot_anim   = true
+
+[browser]
+# The `-b` CLI flag selects a named preset (chrome, chromium, edge,
+# edge-canary, edge-dev, edge-local) and overrides these values. Set
+# them here to change the default when no `-b` flag is passed.
+package      = "com.android.chrome"
+activity     = "com.google.android.apps.chrome.Main"
+cdp_port     = 9222
+chrome_flags = []
+
+[proxy]
+host = "10.0.2.2"   # the emulator sees the host at 10.0.2.2
+port = 8080
+
+# ---------------------------------------------------------------------
+# Example profiles — uncomment the section you want and delete the rest.
+# ---------------------------------------------------------------------
+
+# CI / headless: fast boot, deterministic, no pixels.
+# [emulator]
+# headless = true
+# gpu      = "swiftshader_indirect"
+# ram      = 2048
+
+# Debuggable Chromium (required for CDP on API 35+ since release Chrome
+# ignores debug flags there).
+# [browser]
+# package = "org.chromium.chrome"
+
+# Local Edge build with MojoJS bindings enabled on every page.
+# [browser]
+# package      = "com.microsoft.emmx.local"
+# activity     = "com.microsoft.ruby.Main"
+# chrome_flags = ["--enable-blink-features=MojoJS,MojoJSTest"]
