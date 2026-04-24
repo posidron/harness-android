@@ -121,178 +121,174 @@ class IntentPayload:
     am_args: list[str]     # arguments to pass after `am start -n <component>`
 
 
-def _build_payloads(component: str) -> list[IntentPayload]:
-    """Generate targeted fuzz payloads for a component.
+# ----------------------------------------------------------------------
+# Declarative payload corpus
+# ----------------------------------------------------------------------
+# Each entry is independent; add/remove rows without touching logic.
+#
+# Placeholders substituted per-run via str.format:
+#   {authority}  – a content-provider authority of the target package,
+#                  or "" if the package exposes none.
+#   {package}    – the target package name.
+#
+# Entries whose am_args reference {authority} are *skipped* when the
+# package has no discoverable authorities, instead of being fired at a
+# dummy one.  Set ``needs_authority=True`` on such rows.
+# ----------------------------------------------------------------------
 
-    Each payload is designed to trigger a specific bug class, not just
-    throw random data at the target.
-    """
-    payloads: list[IntentPayload] = []
+_LARGE_JSON = json.dumps({"key": "value" * 500, "nested": {"a": list(range(200))}})[:8000]
 
+_PAYLOAD_CORPUS: list[dict[str, Any]] = [
     # --- Null / missing intent data ---
-    payloads.append(IntentPayload(
-        name="null_action",
-        description="Intent with no action or data — tests default handling",
-        bug_class="null_handling",
-        am_args=[],
-    ))
+    dict(name="null_action", bug_class="null_handling",
+         description="Intent with no action or data — tests default handling",
+         am_args=[]),
 
     # --- Path traversal via data URI ---
-    for path in [
-        "content://com.target/../../../system/etc/hosts",
-        "file:///data/data/com.target/databases/secret.db",
-        "content://com.target/..%2F..%2F..%2Fsystem%2Fetc%2Fhosts",
-        "file:///proc/self/cmdline",
-        "file:///dev/urandom",
-    ]:
-        payloads.append(IntentPayload(
-            name=f"path_traversal_{len(payloads)}",
-            description=f"Path traversal: {path}",
-            bug_class="path_traversal",
-            am_args=["-d", path],
-        ))
+    dict(name="path_traversal_content", bug_class="path_traversal", needs_authority=True,
+         description="Path traversal via content:// authority",
+         am_args=["-d", "content://{authority}/../../../system/etc/hosts"]),
+    dict(name="path_traversal_content_urlencoded", bug_class="path_traversal", needs_authority=True,
+         description="URL-encoded path traversal via content:// authority",
+         am_args=["-d", "content://{authority}/..%2F..%2F..%2Fsystem%2Fetc%2Fhosts"]),
+    dict(name="path_traversal_app_db", bug_class="path_traversal",
+         description="Direct file:// to the app's own private DB",
+         am_args=["-d", "file:///data/data/{package}/databases/secret.db"]),
+    dict(name="path_traversal_proc_cmdline", bug_class="path_traversal",
+         description="file:///proc/self/cmdline",
+         am_args=["-d", "file:///proc/self/cmdline"]),
+    dict(name="path_traversal_urandom", bug_class="path_traversal",
+         description="file:///dev/urandom (resource exhaustion)",
+         am_args=["-d", "file:///dev/urandom"]),
 
     # --- SQL injection via content URI ---
-    for uri in [
-        "content://com.target/items/1' OR '1'='1",
-        "content://com.target/items/1; DROP TABLE users;--",
-        "content://com.target/items/1 UNION SELECT * FROM sqlite_master--",
-    ]:
-        payloads.append(IntentPayload(
-            name=f"sqli_{len(payloads)}",
-            description=f"SQL injection in content URI",
-            bug_class="sql_injection",
-            am_args=["-d", uri],
-        ))
+    dict(name="sqli_tautology", bug_class="sql_injection", needs_authority=True,
+         description="Classic tautology in content:// path",
+         am_args=["-d", "content://{authority}/items/1' OR '1'='1"]),
+    dict(name="sqli_stacked_drop", bug_class="sql_injection", needs_authority=True,
+         description="Stacked-statement DROP",
+         am_args=["-d", "content://{authority}/items/1; DROP TABLE users;--"]),
+    dict(name="sqli_union_sqlite_master", bug_class="sql_injection", needs_authority=True,
+         description="UNION SELECT against sqlite_master",
+         am_args=["-d", "content://{authority}/items/1 UNION SELECT * FROM sqlite_master--"]),
+    dict(name="sqli_projection_injection", bug_class="sql_injection", needs_authority=True,
+         description="SQL in content URI selection parameter",
+         am_args=["-d", "content://{authority}/items?selection=1=1"]),
 
     # --- Type confusion extras ---
-    # Send wrong types for common extra names
-    payloads.append(IntentPayload(
-        name="type_confusion_int_as_string",
-        description="Send string where int expected (key: 'id')",
-        bug_class="type_confusion",
-        am_args=["--es", "id", "not_an_integer"],
-    ))
-    payloads.append(IntentPayload(
-        name="type_confusion_negative",
-        description="Negative integer for array index (key: 'index')",
-        bug_class="type_confusion",
-        am_args=["--ei", "index", "-1"],
-    ))
-    payloads.append(IntentPayload(
-        name="type_confusion_maxint",
-        description="Integer overflow (key: 'count')",
-        bug_class="type_confusion",
-        am_args=["--ei", "count", "2147483647"],
-    ))
-    payloads.append(IntentPayload(
-        name="type_confusion_zero",
-        description="Zero value for size/count (key: 'size')",
-        bug_class="type_confusion",
-        am_args=["--ei", "size", "0"],
-    ))
+    dict(name="type_confusion_int_as_string", bug_class="type_confusion",
+         description="Send string where int expected (key 'id')",
+         am_args=["--es", "id", "not_an_integer"]),
+    dict(name="type_confusion_negative", bug_class="type_confusion",
+         description="Negative integer for array index (key 'index')",
+         am_args=["--ei", "index", "-1"]),
+    dict(name="type_confusion_maxint", bug_class="type_confusion",
+         description="Integer overflow (key 'count')",
+         am_args=["--ei", "count", "2147483647"]),
+    dict(name="type_confusion_zero", bug_class="type_confusion",
+         description="Zero value for size/count (key 'size')",
+         am_args=["--ei", "size", "0"]),
 
     # --- Unicode edge cases ---
-    payloads.append(IntentPayload(
-        name="unicode_rtl_override",
-        description="RTL override character — can confuse UI rendering",
-        bug_class="unicode",
-        am_args=["--es", "text", "\u202eevil_reversed"],
-    ))
-    payloads.append(IntentPayload(
-        name="unicode_null_byte",
-        description="Null byte in string — C string termination",
-        bug_class="unicode",
-        am_args=["--es", "data", "before\x00after"],
-    ))
-    payloads.append(IntentPayload(
-        name="unicode_surrogates",
-        description="Lone UTF-16 surrogate — encoding edge case",
-        bug_class="unicode",
-        am_args=["--es", "text", "\ud800"],
-    ))
-    payloads.append(IntentPayload(
-        name="unicode_overlong",
-        description="Multi-byte zero-width chars",
-        bug_class="unicode",
-        am_args=["--es", "text", "\u200b\u200b\u200b\ufeff\u200d"],
-    ))
+    dict(name="unicode_rtl_override", bug_class="unicode",
+         description="RTL override — can confuse UI rendering",
+         am_args=["--es", "text", "\u202eevil_reversed"]),
+    dict(name="unicode_null_byte", bug_class="unicode",
+         description="Null byte in string — C string termination",
+         am_args=["--es", "data", "before\x00after"]),
+    dict(name="unicode_surrogates", bug_class="unicode",
+         description="Lone UTF-16 surrogate — encoding edge case",
+         am_args=["--es", "text", "\ud800"]),
+    dict(name="unicode_overlong", bug_class="unicode",
+         description="Multi-byte zero-width chars",
+         am_args=["--es", "text", "\u200b\u200b\u200b\ufeff\u200d"]),
 
     # --- Format string ---
-    payloads.append(IntentPayload(
-        name="format_string",
-        description="Format string specifiers — crashes if used in printf-style",
-        bug_class="format_string",
-        am_args=["--es", "message", "%s%s%s%s%s%n%n%n%n%n"],
-    ))
-    payloads.append(IntentPayload(
-        name="format_string_log",
-        description="Format string for Java String.format",
-        bug_class="format_string",
-        am_args=["--es", "title", "%1$s %2$s %3$s %4$s %5$s %99$s"],
-    ))
+    dict(name="format_string_printf", bug_class="format_string",
+         description="printf-style format specifiers",
+         am_args=["--es", "message", "%s%s%s%s%s%n%n%n%n%n"]),
+    dict(name="format_string_java", bug_class="format_string",
+         description="Java String.format specifiers with high positional arg",
+         am_args=["--es", "title", "%1$s %2$s %3$s %4$s %5$s %99$s"]),
 
     # --- Deep link scheme abuse ---
-    for scheme in [
-        "javascript:alert(1)",
-        "data:text/html,<script>alert(1)</script>",
-        "intent:#Intent;action=android.intent.action.VIEW;end",
-        "intent:#Intent;component=com.android.settings/.Settings;end",
-    ]:
-        payloads.append(IntentPayload(
-            name=f"scheme_abuse_{len(payloads)}",
-            description=f"Malicious scheme: {scheme[:50]}",
-            bug_class="scheme_abuse",
-            am_args=["-d", scheme],
-        ))
+    dict(name="scheme_javascript", bug_class="scheme_abuse",
+         description="javascript: URI in Intent data",
+         am_args=["-d", "javascript:alert(1)"]),
+    dict(name="scheme_data_html", bug_class="scheme_abuse",
+         description="data: URI carrying <script>",
+         am_args=["-d", "data:text/html,<script>alert(1)</script>"]),
+    dict(name="scheme_intent_view", bug_class="scheme_abuse",
+         description="Nested intent: URI (view action)",
+         am_args=["-d", "intent:#Intent;action=android.intent.action.VIEW;end"]),
+    dict(name="scheme_intent_settings", bug_class="scheme_abuse",
+         description="Nested intent: URI pointing at system Settings",
+         am_args=["-d", "intent:#Intent;component=com.android.settings/.Settings;end"]),
 
     # --- Empty / minimal data ---
-    payloads.append(IntentPayload(
-        name="empty_string_extra",
-        description="Empty string for all common extra names",
-        bug_class="empty_input",
-        am_args=["--es", "url", "", "--es", "data", "", "--es", "path", ""],
-    ))
+    dict(name="empty_string_extra", bug_class="empty_input",
+         description="Empty string for common extra names",
+         am_args=["--es", "url", "", "--es", "data", "", "--es", "path", ""]),
 
     # --- Parcel size attack ---
-    # Large but realistic string (not just "A"*N, but JSON-like structure)
-    large_json = json.dumps({"key": "value" * 500, "nested": {"a": list(range(200))}})
-    payloads.append(IntentPayload(
-        name="large_parcel",
-        description="Large JSON-like string extra (~10KB) — Binder transaction limit",
-        bug_class="parcel_size",
-        am_args=["--es", "payload", large_json[:8000]],
-    ))
-
-    # --- Content provider projection injection ---
-    payloads.append(IntentPayload(
-        name="projection_injection",
-        description="SQL in content URI selection parameter",
-        bug_class="sql_injection",
-        am_args=["-d", "content://com.target/items?selection=1=1"],
-    ))
+    dict(name="large_parcel", bug_class="parcel_size",
+         description="Large JSON-like string extra (~8KB) — Binder transaction limit",
+         am_args=["--es", "payload", _LARGE_JSON]),
 
     # --- MIME type confusion ---
-    payloads.append(IntentPayload(
-        name="mime_confusion",
-        description="Unexpected MIME type",
-        bug_class="type_confusion",
-        am_args=["-t", "application/x-executable", "-d", "file:///data/local/tmp/test"],
-    ))
+    dict(name="mime_confusion", bug_class="type_confusion",
+         description="Unexpected MIME type",
+         am_args=["-t", "application/x-executable", "-d", "file:///data/local/tmp/test"]),
 
-    # --- Action abuse ---
-    for action in [
-        "android.intent.action.DELETE",
-        "android.intent.action.FACTORY_TEST",
-        "android.intent.action.MASTER_CLEAR",
-    ]:
+    # --- Privileged action abuse ---
+    dict(name="action_delete", bug_class="action_abuse",
+         description="Privileged action: DELETE",
+         am_args=["-a", "android.intent.action.DELETE"]),
+    dict(name="action_factory_test", bug_class="action_abuse",
+         description="Privileged action: FACTORY_TEST",
+         am_args=["-a", "android.intent.action.FACTORY_TEST"]),
+    dict(name="action_master_clear", bug_class="action_abuse",
+         description="Privileged action: MASTER_CLEAR",
+         am_args=["-a", "android.intent.action.MASTER_CLEAR"]),
+]
+
+
+def _format_arg(value: str, ctx: dict[str, str]) -> str:
+    """Safely substitute {placeholder} tokens; leave other braces alone."""
+    try:
+        return value.format(**ctx)
+    except (KeyError, IndexError):
+        return value
+
+
+def _build_payloads(
+    package: str,
+    authorities: list[str] | None = None,
+) -> list[IntentPayload]:
+    """Realise the declarative corpus against a concrete package.
+
+    Parameters
+    ----------
+    package
+        Target package name (substituted for ``{package}``).
+    authorities
+        Content-provider authorities discovered for the package.  The first
+        entry is substituted for ``{authority}``.  When empty, rows marked
+        ``needs_authority=True`` are skipped rather than fired at a fake
+        authority.
+    """
+    authority = authorities[0] if authorities else ""
+    ctx = {"authority": authority, "package": package}
+    payloads: list[IntentPayload] = []
+    for row in _PAYLOAD_CORPUS:
+        if row.get("needs_authority") and not authority:
+            continue
         payloads.append(IntentPayload(
-            name=f"action_{action.split('.')[-1].lower()}",
-            description=f"Privileged action: {action}",
-            bug_class="action_abuse",
-            am_args=["-a", action],
+            name=row["name"],
+            description=_format_arg(row["description"], ctx),
+            bug_class=row["bug_class"],
+            am_args=[_format_arg(a, ctx) for a in row["am_args"]],
         ))
-
     return payloads
 
 
@@ -323,8 +319,11 @@ def fuzz_component(
     component : "package/class" format
     component_type : "activity", "service", "receiver"
     """
+    pkg = component.split("/")[0]
     if payloads is None:
-        payloads = _build_payloads(component)
+        # No authorities known at this entry point; rows that require one
+        # are skipped by _build_payloads.
+        payloads = _build_payloads(pkg, authorities=None)
 
     am_cmd = {"activity": "start", "service": "startservice", "receiver": "broadcast"}
     am_verb = am_cmd.get(component_type, "start")
@@ -332,7 +331,6 @@ def fuzz_component(
     results: list[FuzzResult] = []
     console.print(f"[bold]Fuzzing {component} ({len(payloads)} payloads) …")
 
-    pkg = component.split("/")[0]
     for payload in payloads:
         pid_before = adb.pidof(pkg)
 
@@ -388,13 +386,27 @@ def fuzz_package(adb: ADB, package: str) -> list[FuzzResult]:
         console.print("[yellow]No exported components found to fuzz.")
         return []
 
+    # Collect every content-provider authority discovered on the package
+    # so content:// payloads hit a real URI, not a placeholder.
+    authorities: list[str] = []
+    for comp in components:
+        if comp.component_type == "provider" and comp.authorities:
+            for auth in comp.authorities.split(";"):
+                auth = auth.strip()
+                if auth and auth not in authorities:
+                    authorities.append(auth)
+    if authorities:
+        console.print(f"[dim]Discovered authorities: {', '.join(authorities)}")
+    else:
+        console.print("[dim]No provider authorities found — content:// payloads will be skipped.")
+
     all_results: list[FuzzResult] = []
     for comp in components:
         full_name = f"{comp.package}/{comp.name}"
         if comp.name.startswith("."):
             full_name = f"{comp.package}/{comp.package}{comp.name}"
 
-        payloads = _build_payloads(full_name)
+        payloads = _build_payloads(package, authorities=authorities)
         results = fuzz_component(
             adb, full_name, payloads,
             component_type=comp.component_type,
