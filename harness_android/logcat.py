@@ -192,12 +192,6 @@ class LogcatCapture:
                     message = m.group(0)
                     detail = m.group(1) if m.lastindex and m.lastindex >= 1 else ""
 
-                    # Dedup
-                    key = (event_type, message[:80])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-
                     # Extract timestamp and PID from logcat threadtime format:
                     # MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: message
                     ts = ""
@@ -206,6 +200,16 @@ class LogcatCapture:
                     if len(parts) >= 3:
                         ts = f"{parts[0]} {parts[1]}"
                         pid = parts[2]
+
+                    # Dedup by (type, pid, ts, message prefix).  Keying on
+                    # (type, message[:80]) alone collapsed every ANR in the
+                    # same app, every ASan SEGV on a different address, and
+                    # every Java OOM into one event — the first 80 chars are
+                    # often identical across unrelated crashes.
+                    key = (event_type, pid, ts, message[:80])
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
                     # Grab a few lines of context as stacktrace
                     context_lines = lines[i:i+15]

@@ -185,21 +185,38 @@ _SECURITY_HEADERS = {
 }
 
 
+def _capture_main_frame_headers(browser: Browser) -> dict[str, str]:
+    """Return the main-frame response headers captured during the last
+    :meth:`Browser.navigate` call.
+
+    A page-side ``fetch(url, {method:'HEAD'})`` would be a *second* request
+    subject to CORS filtering and potentially a different cache/middleware
+    path, so the result wouldn't necessarily match what the browser
+    actually received for the document.  :class:`Browser` subscribes to
+    ``Network.responseReceived`` during navigation and stashes the
+    Document-typed response headers on ``browser.main_frame_response_headers``
+    \u2014 we just read them back here.
+
+    If the caller never navigated through the harness (``attach_cdp`` +
+    manual driving), the cache will be empty; we return ``{}`` and callers
+    surface a clear "no CSP / headers found" message instead of lying
+    with CORS-stripped data.
+    """
+    return dict(browser.main_frame_response_headers or {})
+
+
 def analyze_security_headers(browser: Browser) -> SecurityHeadersResult:
-    """Fetch response headers and check for security headers."""
+    """Audit the main-frame response headers captured at navigation time.
+
+    Requires that the page was loaded via :meth:`Browser.navigate` in the
+    current session (that populates ``browser.main_frame_response_headers``).
+    If no navigation has happened yet, the report will flag every security
+    header as missing \u2014 that is the honest answer, rather than fabricating
+    results from a fresh HEAD request that the server might answer
+    differently.
+    """
     result = SecurityHeadersResult()
-    try:
-        browser.send("Network.enable")
-        result.headers = browser.evaluate_js("""
-            (async () => {
-                try {
-                    var r = await fetch(window.location.href, {method: 'HEAD', credentials: 'same-origin'});
-                    var h = {}; r.headers.forEach((v, k) => { h[k] = v; }); return h;
-                } catch(e) { return {}; }
-            })()
-        """) or {}
-    except Exception:  # noqa: BLE001
-        pass
+    result.headers = _capture_main_frame_headers(browser)
 
     for header_name, (desc, severity) in _SECURITY_HEADERS.items():
         found = any(k.lower() == header_name.lower() for k in result.headers)
@@ -501,23 +518,50 @@ def print_storage(data: dict[str, Any]) -> None:
 # ======================================================================
 
 def analyze_csp(browser: Browser) -> dict[str, Any]:
-    """Extract and parse Content-Security-Policy from the current page."""
-    # Check meta tag
+    """Extract and parse Content-Security-Policy from the current page.
+
+    CSP in the real world is almost always delivered via the response
+    ``Content-Security-Policy`` header; only a minority of sites use the
+    ``<meta http-equiv>`` form.  We inspect both, and if the header has
+    a ``Content-Security-Policy-Report-Only`` counterpart we surface it
+    as a separate entry instead of silently ignoring it.
+    """
+    headers = _capture_main_frame_headers(browser)
+    csp_header = ""
+    csp_report_only = ""
+    for k, v in headers.items():
+        if k.lower() == "content-security-policy":
+            csp_header = v
+        elif k.lower() == "content-security-policy-report-only":
+            csp_report_only = v
+
     csp_meta = browser.evaluate_js(
         "(() => { var m = document.querySelector('meta[http-equiv=\"Content-Security-Policy\"]'); "
         "return m ? m.content : ''; })()"
     ) or ""
 
     result: dict[str, Any] = {
+        "csp_header": csp_header,
+        "csp_report_only": csp_report_only,
         "csp_meta": csp_meta,
         "directives": {},
         "issues": [],
     }
 
-    csp = csp_meta
+    # Prefer the enforcing header; fall back to meta; then report-only.
+    csp = csp_header or csp_meta or csp_report_only
     if not csp:
         result["issues"].append("No CSP found (neither header nor meta tag detected)")
         return result
+    if not csp_header and csp_meta:
+        result["issues"].append(
+            "CSP delivered only via <meta http-equiv> — header form is stronger "
+            "(ignored by some UAs for e.g. frame-ancestors, report-uri)"
+        )
+    if not csp_header and csp_report_only:
+        result["issues"].append(
+            "CSP is report-only — violations are reported but NOT blocked"
+        )
 
     # Parse directives
     for directive in csp.split(";"):
@@ -637,7 +681,7 @@ def full_recon(browser: Browser, output: str | None = None) -> dict[str, Any]:
     }
 
     if output:
-        with open(output, "w") as f:
+        with open(output, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, default=str)
         console.print(f"\n[green]Recon report saved to {output}")
 

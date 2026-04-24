@@ -359,6 +359,13 @@ class Browser:
         self._page: Optional[_CDPSession] = None
         self._browser: Optional[_CDPSession] = None
         self._frame_id: Optional[str] = None
+        #: Response headers of the most recent main-frame navigation.
+        #: Populated by :meth:`navigate` when the Network domain is enabled,
+        #: consumed by :mod:`harness_android.recon` for security-header /
+        #: CSP analysis without re-issuing a HEAD request (which would
+        #: follow a different cache / middleware path and miss CORS-filtered
+        #: headers on cross-origin documents).
+        self.main_frame_response_headers: dict[str, str] = {}
 
     # Backward-compat aliases used by other modules / cli
     @property
@@ -646,12 +653,33 @@ class Browser:
         """Navigate the current tab to *url* and (by default) wait for load."""
         assert self._page is not None or not wait
         if self._page:
-            self._page.drain_events()  # discard stale Page.* events
+            self._page.drain_events()  # discard stale Page.* / Network.* events
+        # Opt into Network events so we can capture the main-frame response
+        # headers for security-header / CSP audits.  Enabling is idempotent
+        # and cheap; if the domain was disabled manually the caller can
+        # re-disable it after we're done.
+        try:
+            self.send("Network.enable")
+        except Exception:  # noqa: BLE001
+            pass
+        self.main_frame_response_headers = {}
         result = self.send("Page.navigate", {"url": url})
         if err := result.get("errorText"):
             raise RuntimeError(f"Navigation to {url} failed: {err}")
         if wait:
             self.wait_for_load(timeout=timeout)
+            # Drain buffered Network.responseReceived and pick the main-frame
+            # Document response.  Anything later (subresources, AJAX) can be
+            # fetched separately via drain_events in caller code.
+            for ev in self.drain_events("Network.responseReceived"):
+                params = ev.get("params", {}) or {}
+                if params.get("type") == "Document":
+                    response = params.get("response", {}) or {}
+                    hdrs = response.get("headers", {}) or {}
+                    self.main_frame_response_headers = {
+                        str(k): str(v) for k, v in hdrs.items()
+                    }
+                    break
         console.print(f"[green]Navigated to {url}")
         return result
 

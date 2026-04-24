@@ -67,6 +67,80 @@ def _make_tree_executable(root: Path) -> None:
             _ensure_executable(p)
 
 
+def _safe_extract_zip(zf: "zipfile.ZipFile", dest: Path, *, strip_prefix: str = "") -> None:
+    """Extract *zf* to *dest* refusing any member that escapes *dest*.
+
+    Guards against zip-slip (CVE-2018-1002200 / CVE-2007-4559 class):
+    archive entries named ``../../etc/passwd`` or with absolute paths
+    would otherwise let a crafted archive write arbitrary files on the
+    host. Members whose resolved destination is not inside *dest* are
+    rejected with :class:`RuntimeError`.
+
+    *strip_prefix* drops a leading directory (e.g. ``cmdline-tools/``)
+    from every entry before joining; entries without the prefix are
+    skipped.
+    """
+    dest_real = dest.resolve()
+    for info in zf.infolist():
+        name = info.filename
+        if strip_prefix:
+            if not name.startswith(strip_prefix):
+                continue
+            name = name[len(strip_prefix):]
+        if not name:
+            continue
+        # Reject absolute paths and any backslashes; zip spec forbids
+        # backslash, but malicious archives set them anyway.
+        if name.startswith(("/", "\\")) or "\\" in name:
+            raise RuntimeError(f"Refusing zip entry with unsafe path: {info.filename!r}")
+        target = (dest_real / name).resolve()
+        try:
+            target.relative_to(dest_real)
+        except ValueError:
+            raise RuntimeError(
+                f"Refusing zip entry that escapes destination: {info.filename!r}"
+            ) from None
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(info))
+
+
+def _safe_extract_tar(tf: "tarfile.TarFile", dest: Path) -> None:
+    """tarfile.extractall with path-traversal + symlink guards.
+
+    Python 3.12 added the ``filter='data'`` argument; we use it when
+    available (it rejects absolute paths, parent-dir traversal, device
+    files, and dangerous symlinks) and fall back to a manual check on
+    older runtimes.
+    """
+    dest_real = dest.resolve()
+    try:
+        tf.extractall(dest_real, filter="data")  # type: ignore[arg-type]
+        return
+    except TypeError:
+        pass  # Python < 3.12
+    for member in tf.getmembers():
+        name = member.name
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise RuntimeError(f"Refusing tar entry with unsafe path: {name!r}")
+        if member.issym() or member.islnk():
+            link = member.linkname
+            if link.startswith("/") or ".." in Path(link).parts:
+                raise RuntimeError(
+                    f"Refusing tar link entry with unsafe target: {name} -> {link}"
+                )
+        target = (dest_real / name).resolve()
+        try:
+            target.relative_to(dest_real)
+        except ValueError:
+            raise RuntimeError(
+                f"Refusing tar entry that escapes destination: {name!r}"
+            ) from None
+    tf.extractall(dest_real)
+
+
 def bootstrap_jdk() -> Path:
     """Download a portable OpenJDK if no Java is available. Returns JAVA_HOME."""
     existing = get_java_home()
@@ -85,12 +159,12 @@ def bootstrap_jdk() -> Path:
         import zipfile as _zf
 
         with _zf.ZipFile(io.BytesIO(data)) as zf:
-            zf.extractall(jdk_root)
+            _safe_extract_zip(zf, jdk_root)
     else:
         import tarfile
 
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-            tf.extractall(jdk_root)
+            _safe_extract_tar(tf, jdk_root)
 
     _make_tree_executable(jdk_root)
 
@@ -134,18 +208,7 @@ def bootstrap_sdk() -> Path:
     dest.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        # entries look like cmdline-tools/bin/..., cmdline-tools/lib/... etc.
-        for info in zf.infolist():
-            # Strip the leading `cmdline-tools/` prefix
-            parts = info.filename.split("/", 1)
-            if len(parts) < 2 or not parts[1]:
-                continue
-            target = dest / parts[1]
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(zf.read(info))
+        _safe_extract_zip(zf, dest, strip_prefix="cmdline-tools/")
 
     _make_tree_executable(dest)
 
