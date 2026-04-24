@@ -644,17 +644,45 @@ def pull_file(remote: str, local: str) -> dict:
 # --------------------------------------------------------------------------
 
 @mcp.tool()
-def browser_open(url: str) -> dict:
-    """Open *url* using Android's default browser intent (no CDP).
+def browser_open(url: str, browser: str | None = None) -> dict:
+    """Open *url* in the currently-configured browser preset (no CDP).
 
-    Good for bringing a page into view without restarting the browser
-    process. Use `cdp_navigate` when you already have a CDP session.
+    By default the intent is **routed to the active preset's package**
+    (what :func:`cdp_status` reports as ``browser``, or ``edge-local``
+    if nothing has been attached yet). This matches the user's intent
+    when they've said ``-b edge-local`` for the session — otherwise a
+    plain ``VIEW`` intent would be handed to Android's system default
+    browser (Chrome), silently bypassing the preset selection.
+
+    Pass ``browser="chrome"`` (etc.) to force a specific preset, or
+    ``browser=""`` to fall back to the Android default handler.
     """
-    S.ensure_adb().run(
-        "shell", "am", "start", "-a", "android.intent.action.VIEW",
-        "-d", url, check=False,
-    )
-    return {"ok": True, "url": url}
+    from harness_android.browser import resolve_browser
+
+    adb = S.ensure_adb()
+
+    # Explicit empty string → caller wants the old "system default" behaviour.
+    if browser == "":
+        target_component = None
+    else:
+        name = browser or S.browser_name  # session's bound preset, if any
+        spec = resolve_browser(name)       # honours default_browser TOML
+        target_component = f"{spec.package}/{spec.activity}"
+
+    args = [
+        "shell", "am", "start",
+        "-a", "android.intent.action.VIEW",
+        "-d", url,
+    ]
+    if target_component:
+        args.extend(["-n", target_component])
+
+    adb.run(*args, check=False)
+    return {
+        "ok": True,
+        "url": url,
+        "component": target_component,  # None = system default browser
+    }
 
 
 # --------------------------------------------------------------------------
