@@ -445,8 +445,16 @@ class Browser:
     # ------------------------------------------------------------------
 
     def open_url(self, url: str) -> None:
-        self.adb.launch_url(url)
-        console.print(f"[green]Opened {url}")
+        # Pin the VIEW intent to the selected browser package so `-b` is
+        # honoured. Without `-p`, Android resolves to the system default
+        # browser and ignores the harness's browser selection.
+        self.adb.shell(
+            "am", "start", "-W",
+            "-a", "android.intent.action.VIEW",
+            "-p", self.spec.package,
+            "-d", url,
+        )
+        console.print(f"[green]Opened {url} in {self.spec.name}")
 
     def open_chrome(self) -> None:
         self.adb.launch_activity(f"{self.spec.package}/{self.spec.activity}")
